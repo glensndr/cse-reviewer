@@ -1084,6 +1084,10 @@ function useRenderDiagnostics(name, details = {}) {
   useEffect(() => {
     if (typeof window !== "undefined") {
       window.__CSE_RENDER_DIAGNOSTICS__ = window.__CSE_RENDER_DIAGNOSTICS__ || { total: 0, components: {}, timers: 0, auth: 0 };
+      window.__CSE_RENDER_DIAGNOSTICS__.events = window.__CSE_RENDER_DIAGNOSTICS__.events || [];
+      window.__CSE_RENDER_DIAGNOSTICS__.profileFetches = window.__CSE_RENDER_DIAGNOSTICS__.profileFetches || 0;
+      window.__CSE_RENDER_DIAGNOSTICS__.sessionFetches = window.__CSE_RENDER_DIAGNOSTICS__.sessionFetches || 0;
+      window.__CSE_RENDER_DIAGNOSTICS__.stateChanges = window.__CSE_RENDER_DIAGNOSTICS__.stateChanges || 0;
       window.__CSE_RENDER_DIAGNOSTICS__.components[name] = window.__CSE_RENDER_DIAGNOSTICS__.components[name] || 0;
     }
     console.info(`[CSE Render] ${name} mounted`, details);
@@ -1104,6 +1108,57 @@ function useRenderDiagnostics(name, details = {}) {
   });
   return countRef.current;
 }
+
+function markDiagnostic(type, name, payload = {}) {
+  if (typeof window === "undefined") return;
+  window.__CSE_RENDER_DIAGNOSTICS__ = window.__CSE_RENDER_DIAGNOSTICS__ || { total: 0, components: {}, timers: 0, auth: 0, profileFetches: 0, sessionFetches: 0, stateChanges: 0, events: [] };
+  const diagnostics = window.__CSE_RENDER_DIAGNOSTICS__;
+  if (type === "profileFetch") diagnostics.profileFetches += 1;
+  if (type === "sessionFetch") diagnostics.sessionFetches += 1;
+  if (type === "auth") diagnostics.auth += 1;
+  if (type === "state") diagnostics.stateChanges += 1;
+  diagnostics.events = [{ at: new Date().toLocaleTimeString(), type, name, payload }, ...(diagnostics.events || [])].slice(0, 8);
+  console.info(`[CSE Diagnostic] ${type}: ${name}`, payload);
+}
+
+const DebugOverlay = memo(function DebugOverlay() {
+  const [snapshot, setSnapshot] = useState(null);
+  useRenderDiagnostics("DebugOverlay", { visible: true });
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (typeof window === "undefined") return;
+      const source = window.__CSE_RENDER_DIAGNOSTICS__;
+      if (!source) return;
+      setSnapshot({
+        total: source.total || 0,
+        profileFetches: source.profileFetches || 0,
+        sessionFetches: source.sessionFetches || 0,
+        auth: source.auth || 0,
+        stateChanges: source.stateChanges || 0,
+        components: { ...(source.components || {}) },
+        events: [...(source.events || [])]
+      });
+    }, 700);
+    return () => clearInterval(timer);
+  }, []);
+
+  if (!snapshot) return null;
+  return (
+    <div className="fixed bottom-3 right-3 z-50 max-w-xs rounded-2xl border border-white/15 bg-slate-950/90 p-3 text-[11px] text-white/75 shadow-2xl backdrop-blur-xl">
+      <div className="mb-2 font-black text-cyan-100">Render Debug</div>
+      <div className="grid grid-cols-2 gap-x-3 gap-y-1">
+        <span>Total renders</span><b>{snapshot.total}</b>
+        <span>Profile fetches</span><b>{snapshot.profileFetches}</b>
+        <span>Session fetches</span><b>{snapshot.sessionFetches}</b>
+        <span>Auth events</span><b>{snapshot.auth}</b>
+      </div>
+      <div className="mt-2 max-h-24 overflow-auto border-t border-white/10 pt-2">
+        {snapshot.events.map((event, idx) => <div key={`${event.at}-${idx}`} className="truncate">{event.at} {event.type}: {event.name}</div>)}
+      </div>
+    </div>
+  );
+});
 
 const TrialCountdown = memo(function TrialCountdown({ expiresAt, userId, onExpired, prefix = "Trial" }) {
   const [remaining, setRemaining] = useState(() => secondsUntil(expiresAt));
@@ -1182,6 +1237,7 @@ export default function App() {
   const cloudRefreshInFlightRef = useRef(false);
   const loadedSessionKeyRef = useRef("");
   const authEventCountRef = useRef(0);
+  const profileLoadedRef = useRef(false);
   const stats = useMemo(() => analyze(progress), [progress]);
   const allQuestions = useMemo(() => buildQuestionBank(progress), [progress.imports]);
   const readiness = useMemo(() => {
@@ -1219,6 +1275,26 @@ export default function App() {
       window.location.replace(`/auth/callback${url.search}`);
     }
   }, []);
+
+  useEffect(() => {
+    markDiagnostic("state", "screen", { screen });
+  }, [screen]);
+
+  useEffect(() => {
+    markDiagnostic("state", "cloudLoading", { cloudLoading });
+  }, [cloudLoading]);
+
+  useEffect(() => {
+    markDiagnostic("state", "profile", { status: profile?.status || null, role: profile?.role || null, userId: profile?.user_id || null });
+  }, [profile?.status, profile?.role, profile?.user_id]);
+
+  useEffect(() => {
+    markDiagnostic("state", "authSession", { userId: authSession?.user?.id || null });
+  }, [authSession?.user?.id]);
+
+  useEffect(() => {
+    markDiagnostic("state", "exam", { mode, index: exam?.index ?? null, submitted: exam?.submitted ?? null, endsAt: exam?.endsAt || null });
+  }, [mode, exam?.index, exam?.submitted, exam?.endsAt]);
 
   async function ensureCloudProfile(session) {
     if (!supabase || !session?.user) return;
@@ -1269,11 +1345,12 @@ export default function App() {
     authError("analytics initialization failed", analyticsResult.error);
   }
 
-  async function refreshCloudState(session = authSession) {
+  async function refreshCloudState(session = authSession, options = {}) {
     if (!supabase || !session?.user) {
       setCloudLoading(false);
       return;
     }
+    const showLoading = options.showLoading ?? !profileLoadedRef.current;
     const sessionKey = `${session.user.id}:${session.access_token?.slice(-18) || "no-token"}`;
     if (cloudRefreshInFlightRef.current) {
       authLog("profile refresh skipped: already in flight", { userId: session.user.id });
@@ -1284,8 +1361,9 @@ export default function App() {
       return;
     }
     cloudRefreshInFlightRef.current = true;
-    authLog("profile refresh started", { userId: session.user.id, sessionKey });
-    setCloudLoading(true);
+    markDiagnostic("profileFetch", "refreshCloudState", { userId: session.user.id, showLoading, reason: options.reason || "unknown" });
+    authLog("profile refresh started", { userId: session.user.id, sessionKey, showLoading, reason: options.reason });
+    if (showLoading) setCloudLoading(true);
     try {
       await ensureCloudProfile(session);
       const userId = session.user.id;
@@ -1311,7 +1389,10 @@ export default function App() {
       const progressRow = progressResult.data;
       const historyRows = historyResult.data;
       const deviceRows = deviceResult.data;
-      if (profileRow) setProfile(profileRow);
+      if (profileRow) {
+        profileLoadedRef.current = true;
+        setProfile(profileRow);
+      }
       if (progressRow?.app_state && Object.keys(progressRow.app_state).length) setProgress({ ...initialProgress, ...progressRow.app_state });
       setLoginHistory(historyRows || []);
       setDeviceSessions(deviceRows || []);
@@ -1361,6 +1442,7 @@ export default function App() {
       setAccessMessage("Supabase is not configured. Add NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY to enable cloud access.");
       return;
     }
+    markDiagnostic("sessionFetch", "initial getSession");
     supabase.auth.getSession().then(({ data, error }) => {
       authLog("initial session check", { hasSession: Boolean(data.session), userId: data.session?.user?.id, error });
       if (error) {
@@ -1368,17 +1450,20 @@ export default function App() {
         setAccessMessage(error.message);
       }
       setAuthSession(data.session);
-      if (data.session) refreshCloudState(data.session);
+      if (data.session) refreshCloudState(data.session, { showLoading: !profileLoadedRef.current, reason: "initial getSession" });
       else setCloudLoading(false);
     });
     const { data: listener } = supabase.auth.onAuthStateChange((event, session) => {
       authEventCountRef.current += 1;
+      markDiagnostic("auth", event, { hasSession: Boolean(session), userId: session?.user?.id });
       if (typeof window !== "undefined" && window.__CSE_RENDER_DIAGNOSTICS__) window.__CSE_RENDER_DIAGNOSTICS__.auth = authEventCountRef.current;
       authLog("auth state change", { event, count: authEventCountRef.current, hasSession: Boolean(session), userId: session?.user?.id });
       if (event === "SIGNED_OUT") setAccessMessage("");
       setAuthSession(session);
-      if (session) refreshCloudState(session);
+      if (session && ["INITIAL_SESSION", "SIGNED_IN", "USER_UPDATED"].includes(event)) refreshCloudState(session, { showLoading: !profileLoadedRef.current, reason: event });
+      else if (session) authLog("profile refresh skipped for auth event", { event, userId: session.user?.id });
       else {
+        profileLoadedRef.current = false;
         setProfile(null);
         setProgress(initialProgress);
       }
@@ -1443,6 +1528,7 @@ export default function App() {
       await supabase.auth.signOut();
     }
     setAuthSession(null);
+    profileLoadedRef.current = false;
     setProfile(null);
     setScreen("dashboard");
   }
@@ -1586,7 +1672,9 @@ export default function App() {
     setScreen("results");
   }
 
-  const Header = () => (
+  const Header = () => {
+    useRenderDiagnostics("Header", { screen, status: profile?.status });
+    return (
     <div className="sticky top-0 z-30 border-b border-white/10 bg-slate-950/75 backdrop-blur-xl">
       <div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-4">
         <button onClick={() => setScreen("dashboard")} className="flex items-center gap-3 text-left">
@@ -1602,9 +1690,12 @@ export default function App() {
         </div>
       </div>
     </div>
-  );
+    );
+  };
 
-  const Dashboard = () => (
+  const Dashboard = () => {
+    useRenderDiagnostics("Dashboard", { screen, category, subCategory });
+    return (
     <div className="mx-auto max-w-7xl px-4 py-8">
       <div className="grid gap-4 lg:grid-cols-[1.35fr_.65fr]">
         <motion.section initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} className="overflow-hidden rounded-[2rem] border border-white/10 bg-white/[.08] p-6 shadow-2xl backdrop-blur-xl">
@@ -1679,9 +1770,11 @@ export default function App() {
       </div>
       <Analytics />
     </div>
-  );
+    );
+  };
 
   const Analytics = () => {
+    useRenderDiagnostics("Reviewer Analytics", { totalAnswered: stats.total });
     const subRows = CATEGORIES.flatMap((cat) => cat.subs.map((sub) => {
       const s = stats.subStats.find((row) => row.name === sub);
       return { name: sub, category: cat.short, total: s?.total || 0, accuracy: s?.accuracy || 0, correct: s?.correct || 0, wrong: s?.wrong || 0 };
@@ -1716,6 +1809,7 @@ export default function App() {
   };
 
   const Exam = () => {
+    useRenderDiagnostics(mode?.includes("Mock") ? "Mock Exams" : "Practice Exams", { mode, index: exam?.index, submitted: exam?.submitted });
     if (!exam) return null;
     const q = exam.questions[exam.index];
     const ans = exam.answers[q.id];
@@ -1769,6 +1863,7 @@ export default function App() {
   };
 
   const Results = () => {
+    useRenderDiagnostics("Results", { mode });
     if (!exam) return null;
     const answers = Object.values(exam.answers);
     const correct = answers.filter((a) => a.status === "correct").length;
@@ -1782,6 +1877,7 @@ export default function App() {
   };
 
   const Review = () => {
+    useRenderDiagnostics("Reviewer", { filter: reviewFilter });
     const savedRows = Object.entries(progress.answered || {}).map(([id, row]) => {
       const q = allQuestions.find((item) => item.id === id);
       return q ? { selected: row.selected, status: row.status, time: row.time, question: q } : null;
@@ -1795,8 +1891,9 @@ export default function App() {
     return <div className="mx-auto max-w-5xl px-4 py-8"><div className="mb-4 flex flex-wrap justify-between gap-3"><h2 className="text-2xl font-black">Question Review Center</h2><div className="flex flex-wrap gap-2">{["All", "Correct", "Wrong", "Skipped", "Unanswered", "Bookmarked"].map((f) => <button key={f} onClick={() => setReviewFilter(f)} className={`rounded-xl px-4 py-2 text-sm font-bold ${reviewFilter === f ? "bg-white text-slate-950" : "bg-white/10"}`}>{f}</button>)}</div></div><div className="space-y-4">{rows.map((a) => <div key={a.question.id} className="rounded-2xl border border-white/10 bg-white/[.07] p-5"><div className="mb-2 flex flex-wrap gap-2"><Pill>{a.status}</Pill><Pill>{a.question.category}</Pill><Pill>{a.question.subCategory}</Pill>{progress.bookmarks?.[a.question.id] && <Pill>Bookmarked</Pill>}</div><h3 className="font-black">{a.question.question}</h3><p className="mt-2 text-sm text-white/65">Your answer: <b>{a.selected || "Skipped"}</b> • Correct answer: <b className="text-emerald-200">{a.question.answer}</b></p><p className="mt-3 text-sm leading-7 text-white/70">{a.question.explanation}</p><div className="mt-3 grid gap-2">{a.question.choices.map((choice, idx) => <p key={choice} className="rounded-xl bg-white/5 p-3 text-xs text-white/60">{choiceInsight(a.question, choice, idx)}</p>)}</div><p className="mt-2 text-sm text-cyan-100"><b>Tip:</b> {a.question.learningTip}</p></div>)}</div></div>;
   };
 
-  const Learn = () => (
-    <div className="mx-auto grid max-w-7xl gap-5 px-4 py-8 lg:grid-cols-[.35fr_.65fr]">
+  const Learn = () => {
+    useRenderDiagnostics("Reviewer Lessons", { topic: activeLesson.topic });
+    return <div className="mx-auto grid max-w-7xl gap-5 px-4 py-8 lg:grid-cols-[.35fr_.65fr]">
       <aside className="rounded-[1.5rem] border border-white/10 bg-white/[.07] p-4 backdrop-blur-xl">
         <h2 className="mb-3 text-xl font-black">Learning Modules</h2>
         <div className="max-h-[680px] space-y-2 overflow-auto pr-1">
@@ -1821,10 +1918,11 @@ export default function App() {
         </div>
         <div className="mt-5 flex flex-wrap gap-3"><button onClick={() => startExam(activeLesson.category, "Mini Quiz", activeLesson.topic)} className="rounded-2xl bg-white px-5 py-3 font-bold text-slate-950">5-Question Mini Quiz</button><button onClick={() => startExam(activeLesson.category, "Mastery Test", activeLesson.topic)} className="rounded-2xl border border-white/10 bg-white/10 px-5 py-3 font-bold">Mastery Test</button></div>
       </section>
-    </div>
-  );
+    </div>;
+  };
 
   const Admin = () => {
+    useRenderDiagnostics("Admin", { isAdmin });
     const bankStats = CATEGORIES.map((cat) => ({ name: cat.name, count: allQuestions.filter((q) => q.category === cat.name).length }));
     if (!isAdmin) return <div className="mx-auto max-w-4xl px-4 py-10"><section className="rounded-[2rem] border border-white/10 bg-white/[.08] p-7 text-center backdrop-blur-xl"><h2 className="text-3xl font-black">Admin Access Required</h2><p className="mt-3 text-white/60">Only accounts with the Admin role can manage users, licenses, sessions, and approvals.</p></section></div>;
     return <div className="mx-auto max-w-7xl px-4 py-8">
@@ -1840,8 +1938,9 @@ export default function App() {
     </div>;
   };
 
-  const Account = () => (
-    <div className="mx-auto max-w-5xl px-4 py-8">
+  const Account = () => {
+    useRenderDiagnostics("Login page", { hasProfile: Boolean(profile), status: profile?.status });
+    return <div className="mx-auto max-w-5xl px-4 py-8">
       <section className="rounded-[2rem] border border-white/10 bg-white/[.08] p-6 backdrop-blur-xl">
         <p className="text-emerald-200">Supabase Authentication</p>
         <h2 className="text-3xl font-black">Gmail Account & Licensing</h2>
@@ -1857,11 +1956,12 @@ export default function App() {
           <button onClick={logoutAccount} className="rounded-2xl border border-white/10 bg-white/10 px-5 py-3 font-bold">Logout</button>
         </div>}
       </section>
-    </div>
-  );
+    </div>;
+  };
 
-  const AccessLocked = () => (
-    <div className="mx-auto max-w-4xl px-4 py-10">
+  const AccessLocked = () => {
+    useRenderDiagnostics(profile?.status === "Expired" ? "Trial Expired page" : "Access Locked page", { status: profile?.status });
+    return <div className="mx-auto max-w-4xl px-4 py-10">
       <section className="rounded-[2rem] border border-white/10 bg-white/[.08] p-7 text-center backdrop-blur-xl">
         <ShieldCheck className="mx-auto mb-4 h-12 w-12 text-emerald-200" />
         <h2 className="text-3xl font-black">Cloud Access Required</h2>
@@ -1893,8 +1993,8 @@ export default function App() {
         )}
         <button onClick={() => setScreen("account")} className="mt-6 rounded-2xl bg-white px-5 py-3 font-black text-slate-950">Go to Gmail Login</button>
       </section>
-    </div>
-  );
+    </div>;
+  };
 
   return (
     <div className="min-h-screen bg-[radial-gradient(circle_at_20%_10%,rgba(45,212,191,.22),transparent_30%),radial-gradient(circle_at_80%_0%,rgba(244,114,182,.16),transparent_28%),linear-gradient(135deg,#06131f,#101827_45%,#11130f)] text-white">
@@ -1908,6 +2008,7 @@ export default function App() {
       {!cloudLoading && hasAccess && screen === "learn" && <Learn />}
       {!cloudLoading && hasAccess && screen === "admin" && <Admin />}
       {screen === "account" && <Account />}
+      <DebugOverlay />
     </div>
   );
 }
