@@ -1,6 +1,6 @@
 export const metadata = {
-  title: "Civil Service Professional Exam Mastery Simulator 2026",
-  description: "Civil Service Professional learning platform, CBT simulator, analytics dashboard, and reviewer import system."
+  title: "Civil Service Exam Mastery",
+  description: "2026 Civil Service Exam Reviewer & Simulator"
 };
 
 export default function RootLayout({ children }) {

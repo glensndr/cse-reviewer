@@ -1498,7 +1498,7 @@ export default function App() {
       <div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-4">
         <button onClick={() => setScreen("dashboard")} className="flex items-center gap-3 text-left">
           <div className="grid h-11 w-11 place-items-center rounded-2xl bg-gradient-to-br from-emerald-300 to-sky-400 text-slate-950 shadow-glow"><GraduationCap /></div>
-          <div><h1 className="text-base font-black sm:text-xl">Civil Service Professional Exam Mastery Simulator</h1><p className="text-xs text-white/55">2026 Civil Service Exam Professional CBT Reviewer</p></div>
+          <div><h1 className="text-base font-black sm:text-xl">Civil Service Exam Mastery</h1><p className="text-xs text-white/55">2026 Civil Service Exam Reviewer & Simulator</p></div>
         </button>
         <div className="hidden items-center gap-2 sm:flex">
           <button onClick={() => setScreen("learn")} className="rounded-full border border-white/10 bg-white/10 px-3 py-1 text-xs font-semibold text-white/80">Learn</button>
