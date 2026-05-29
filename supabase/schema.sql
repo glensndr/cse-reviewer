@@ -134,6 +134,21 @@ as $$
   );
 $$;
 
+drop policy if exists "users read own or admin" on public.users;
+drop policy if exists "users insert own" on public.users;
+drop policy if exists "profiles read own or admin" on public.user_profiles;
+drop policy if exists "profiles insert own" on public.user_profiles;
+drop policy if exists "profiles update own safe fields" on public.user_profiles;
+drop policy if exists "profiles admin update" on public.user_profiles;
+drop policy if exists "progress own" on public.user_progress;
+drop policy if exists "question bank readable" on public.question_bank;
+drop policy if exists "lessons readable" on public.lessons;
+drop policy if exists "mock exams own or admin" on public.mock_exams;
+drop policy if exists "bookmarks own" on public.bookmarks;
+drop policy if exists "analytics own or admin" on public.analytics;
+drop policy if exists "login history own or admin" on public.login_history;
+drop policy if exists "device sessions own or admin" on public.device_sessions;
+
 create policy "users read own or admin" on public.users for select using (id = auth.uid() or public.is_admin());
 create policy "users insert own" on public.users for insert with check (id = auth.uid());
 create policy "profiles read own or admin" on public.user_profiles for select using (user_id = auth.uid() or public.is_admin());

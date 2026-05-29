@@ -1101,8 +1101,20 @@ export default function App() {
   }, [category, allQuestions]);
   const achievements = useMemo(() => achievementList(progress, stats), [progress, stats]);
 
-  const hasAccess = profile?.status === "Approved" || (profile?.status === "Trial Active" && trialRemaining > 0);
+  const trialExpiresAt = profile?.trial_expires_at ? new Date(profile.trial_expires_at).getTime() : 0;
+  const trialActiveNow = profile?.status === "Trial Active" && trialExpiresAt > Date.now();
+  const hasAccess = profile?.status === "Approved" || trialActiveNow;
   const isAdmin = profile?.role === "Admin";
+
+  function authLog(label, payload = {}) {
+    console.info(`[CSE Auth] ${label}`, payload);
+  }
+
+  function authError(label, error, extra = {}) {
+    if (!error) return;
+    console.error(`[CSE Auth] ${label}`, { message: error.message, code: error.code, details: error.details, hint: error.hint, ...extra });
+    setAccessMessage(`${label}: ${error.message}`);
+  }
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -1118,12 +1130,26 @@ export default function App() {
     const user = session.user;
     const now = new Date().toISOString();
     const fullName = user.user_metadata?.full_name || user.user_metadata?.name || user.email?.split("@")[0] || "Student";
-    await supabase.from("users").upsert({ id: user.id, email: user.email, full_name: fullName, created_at: user.created_at }, { onConflict: "id" });
-    const { data: existingProfile } = await supabase.from("user_profiles").select("user_id,status").eq("user_id", user.id).maybeSingle();
+    authLog("session user", { id: user.id, email: user.email, metadata: user.user_metadata });
+
+    const existingUserResult = await supabase.from("users").select("id,email").eq("id", user.id).maybeSingle();
+    authError("users lookup failed", existingUserResult.error);
+    if (!existingUserResult.data) {
+      const insertUserResult = await supabase.from("users").insert({ id: user.id, email: user.email, full_name: fullName, created_at: user.created_at });
+      authLog("users insert attempted", { id: user.id, email: user.email });
+      authError("users insert failed", insertUserResult.error);
+    }
+
+    const profileLookup = await supabase.from("user_profiles").select("user_id,status,role,trial_expires_at").eq("user_id", user.id).maybeSingle();
+    authLog("profile lookup", { data: profileLookup.data, error: profileLookup.error });
+    authError("profile lookup failed", profileLookup.error);
+    const existingProfile = profileLookup.data;
     if (existingProfile) {
-      await supabase.from("user_profiles").update({ full_name: fullName, gmail_address: user.email, last_login: now, updated_at: now }).eq("user_id", user.id);
+      const updateProfileResult = await supabase.from("user_profiles").update({ full_name: fullName, gmail_address: user.email, last_login: now, updated_at: now }).eq("user_id", user.id);
+      authLog("profile update attempted", { user_id: user.id });
+      authError("profile update failed", updateProfileResult.error);
     } else {
-      await supabase.from("user_profiles").insert({
+      const insertProfileResult = await supabase.from("user_profiles").insert({
         user_id: user.id,
         full_name: fullName,
         gmail_address: user.email,
@@ -1133,10 +1159,19 @@ export default function App() {
         trial_started_at: now,
         trial_expires_at: new Date(Date.now() + TRIAL_MINUTES * 60 * 1000).toISOString()
       });
+      authLog("trial/profile creation attempted", { user_id: user.id, status: "Trial Active" });
+      authError("trial/profile creation failed", insertProfileResult.error);
     }
-    const { data: existingProgress } = await supabase.from("user_progress").select("user_id").eq("user_id", user.id).maybeSingle();
-    if (!existingProgress) await supabase.from("user_progress").insert({ user_id: user.id, app_state: initialProgress });
-    await supabase.from("analytics").upsert({ user_id: user.id }, { onConflict: "user_id" });
+    const progressLookup = await supabase.from("user_progress").select("user_id").eq("user_id", user.id).maybeSingle();
+    authLog("progress lookup", { data: progressLookup.data, error: progressLookup.error });
+    authError("progress lookup failed", progressLookup.error);
+    if (!progressLookup.data) {
+      const insertProgressResult = await supabase.from("user_progress").insert({ user_id: user.id, app_state: initialProgress });
+      authLog("progress initialization attempted", { user_id: user.id });
+      authError("progress initialization failed", insertProgressResult.error);
+    }
+    const analyticsResult = await supabase.from("analytics").upsert({ user_id: user.id }, { onConflict: "user_id" });
+    authError("analytics initialization failed", analyticsResult.error);
   }
 
   async function refreshCloudState(session = authSession) {
@@ -1147,12 +1182,28 @@ export default function App() {
     setCloudLoading(true);
     await ensureCloudProfile(session);
     const userId = session.user.id;
-    const [{ data: profileRow }, { data: progressRow }, { data: historyRows }, { data: deviceRows }] = await Promise.all([
+    const [profileResult, progressResult, historyResult, deviceResult] = await Promise.all([
       supabase.from("user_profiles").select("*").eq("user_id", userId).single(),
       supabase.from("user_progress").select("app_state").eq("user_id", userId).single(),
       supabase.from("login_history").select("*").eq("user_id", userId).order("created_at", { ascending: false }).limit(30),
       supabase.from("device_sessions").select("*").eq("user_id", userId).order("last_login", { ascending: false })
     ]);
+    authLog("post-login query results", {
+      userId,
+      profile: profileResult.data,
+      profileError: profileResult.error,
+      progressError: progressResult.error,
+      historyError: historyResult.error,
+      deviceError: deviceResult.error
+    });
+    authError("profile fetch failed", profileResult.error);
+    authError("progress fetch failed", progressResult.error);
+    authError("login history fetch failed", historyResult.error);
+    authError("device sessions fetch failed", deviceResult.error);
+    const profileRow = profileResult.data;
+    const progressRow = progressResult.data;
+    const historyRows = historyResult.data;
+    const deviceRows = deviceResult.data;
     if (profileRow) setProfile(profileRow);
     if (progressRow?.app_state && Object.keys(progressRow.app_state).length) setProgress({ ...initialProgress, ...progressRow.app_state });
     setLoginHistory(historyRows || []);
@@ -1168,7 +1219,10 @@ export default function App() {
     const now = new Date().toISOString();
     const device_id = deviceFingerprint();
     const device_info = deviceLabel();
-    const { data: activeDevices } = await supabase.from("device_sessions").select("*").eq("user_id", userId).eq("active", true).order("last_login", { ascending: false });
+    const activeDeviceResult = await supabase.from("device_sessions").select("*").eq("user_id", userId).eq("active", true).order("last_login", { ascending: false });
+    const activeDevices = activeDeviceResult.data;
+    authLog("active device lookup", { userId, activeDevices });
+    authError("active device lookup failed", activeDeviceResult.error);
     const known = (activeDevices || []).some((d) => d.device_id === device_id);
     if (!known && (activeDevices || []).length >= MAX_ACTIVE_DEVICES) {
       setAccessMessage("Maximum active devices reached. Please contact the administrator to reset device access.");
@@ -1176,13 +1230,17 @@ export default function App() {
       await supabase.auth.signOut();
       return;
     }
-    await supabase.from("device_sessions").upsert({ user_id: userId, device_id, device_info, last_login: now, active: true }, { onConflict: "user_id,device_id" });
-    await supabase.from("login_history").insert({ user_id: userId, device_id, device_info, action: "LOGIN" });
+    const deviceResult = await supabase.from("device_sessions").upsert({ user_id: userId, device_id, device_info, last_login: now, active: true }, { onConflict: "user_id,device_id" });
+    authError("device session upsert failed", deviceResult.error);
+    const historyResult = await supabase.from("login_history").insert({ user_id: userId, device_id, device_info, action: "LOGIN" });
+    authError("login history insert failed", historyResult.error);
   }
 
   async function loadAdminUsers() {
     if (!supabase) return;
-    const { data } = await supabase.from("user_profiles").select("*, device_sessions(*), login_history(*)").order("registration_date", { ascending: false });
+    const { data, error } = await supabase.from("user_profiles").select("*, device_sessions(*), login_history(*)").order("registration_date", { ascending: false });
+    authLog("admin users lookup", { count: data?.length || 0, error });
+    authError("admin users lookup failed", error);
     setCloudUsers(data || []);
   }
 
@@ -1193,12 +1251,17 @@ export default function App() {
       return;
     }
     supabase.auth.getSession().then(({ data, error }) => {
-      if (error) setAccessMessage(error.message);
+      authLog("initial session check", { hasSession: Boolean(data.session), userId: data.session?.user?.id, error });
+      if (error) {
+        console.error("[CSE Auth] initial session check failed", error);
+        setAccessMessage(error.message);
+      }
       setAuthSession(data.session);
       if (data.session) refreshCloudState(data.session);
       else setCloudLoading(false);
     });
     const { data: listener } = supabase.auth.onAuthStateChange((event, session) => {
+      authLog("auth state change", { event, hasSession: Boolean(session), userId: session?.user?.id });
       if (event === "SIGNED_OUT") setAccessMessage("");
       setAuthSession(session);
       if (session) refreshCloudState(session);
@@ -1259,6 +1322,7 @@ export default function App() {
     }
     setAccessMessage("");
     const redirectTo = typeof window !== "undefined" ? `${window.location.origin}/auth/callback` : undefined;
+    authLog("starting Google OAuth", { redirectTo });
     const { error } = await supabase.auth.signInWithOAuth({
       provider: "google",
       options: {
@@ -1708,6 +1772,7 @@ export default function App() {
       <section className="rounded-[2rem] border border-white/10 bg-white/[.08] p-7 text-center backdrop-blur-xl">
         <ShieldCheck className="mx-auto mb-4 h-12 w-12 text-emerald-200" />
         <h2 className="text-3xl font-black">Cloud Access Required</h2>
+        {accessMessage && <div className="mx-auto mt-4 max-w-2xl rounded-2xl border border-amber-200/30 bg-amber-300/10 p-4 text-sm text-amber-100">{accessMessage}</div>}
         <p className="mx-auto mt-3 max-w-2xl text-white/65">{profile?.status === "Expired" ? "Your trial access has ended. Please contact the administrator for full access." : profile?.status === "Suspended" ? "Your account is suspended. Please contact the administrator." : "Please sign in with Gmail. New users receive a 30-minute trial. Approved users receive unlimited access."}</p>
         <button onClick={() => setScreen("account")} className="mt-6 rounded-2xl bg-white px-5 py-3 font-black text-slate-950">Go to Gmail Login</button>
       </section>
