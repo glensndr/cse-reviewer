@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { supabase, supabaseConfigured } from "./supabaseClient";
 import {
@@ -1069,7 +1069,100 @@ function Pill({ children, className = "" }) {
   return <span className={`inline-flex items-center rounded-full border border-white/10 bg-white/10 px-3 py-1 text-xs font-semibold text-white/80 ${className}`}>{children}</span>;
 }
 
+function formatSeconds(seconds) {
+  const safe = Math.max(0, Number(seconds) || 0);
+  return `${Math.floor(safe / 60)}:${String(safe % 60).padStart(2, "0")}`;
+}
+
+function secondsUntil(isoOrMs) {
+  const target = typeof isoOrMs === "number" ? isoOrMs : new Date(isoOrMs || 0).getTime();
+  return Math.max(0, Math.floor((target - Date.now()) / 1000));
+}
+
+function useRenderDiagnostics(name, details = {}) {
+  const countRef = useRef(0);
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      window.__CSE_RENDER_DIAGNOSTICS__ = window.__CSE_RENDER_DIAGNOSTICS__ || { total: 0, components: {}, timers: 0, auth: 0 };
+      window.__CSE_RENDER_DIAGNOSTICS__.components[name] = window.__CSE_RENDER_DIAGNOSTICS__.components[name] || 0;
+    }
+    console.info(`[CSE Render] ${name} mounted`, details);
+    return () => console.info(`[CSE Render] ${name} unmounted`);
+  }, []);
+  countRef.current += 1;
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      const diagnostics = window.__CSE_RENDER_DIAGNOSTICS__;
+      if (diagnostics) {
+        diagnostics.total += 1;
+        diagnostics.components[name] = countRef.current;
+        if (name.includes("Countdown")) diagnostics.timers += 1;
+        console.info("[CSE Diagnostics]", diagnostics);
+      }
+    }
+    console.info(`[CSE Render] ${name} rerender #${countRef.current}`, details);
+  });
+  return countRef.current;
+}
+
+const TrialCountdown = memo(function TrialCountdown({ expiresAt, userId, onExpired, prefix = "Trial" }) {
+  const [remaining, setRemaining] = useState(() => secondsUntil(expiresAt));
+  const expiredRef = useRef(false);
+  const onExpiredRef = useRef(onExpired);
+  onExpiredRef.current = onExpired;
+  useRenderDiagnostics("TrialCountdown", { userId, expiresAt, remaining });
+
+  useEffect(() => {
+    expiredRef.current = false;
+    const tick = () => {
+      const next = secondsUntil(expiresAt);
+      console.info("[CSE Timer] trial update", { userId, remaining: next });
+      setRemaining((current) => (current === next ? current : next));
+      if (next === 0 && !expiredRef.current) {
+        expiredRef.current = true;
+        onExpiredRef.current?.();
+      }
+    };
+    tick();
+    const timer = setInterval(tick, 1000);
+    return () => clearInterval(timer);
+  }, [expiresAt, userId]);
+
+  return <Pill>{prefix} {formatSeconds(remaining)}</Pill>;
+});
+
+const ExamCountdown = memo(function ExamCountdown({ endsAt, active, onExpire }) {
+  const [remaining, setRemaining] = useState(() => secondsUntil(endsAt));
+  const expiredRef = useRef(false);
+  const onExpireRef = useRef(onExpire);
+  onExpireRef.current = onExpire;
+  useRenderDiagnostics("ExamCountdown", { active, endsAt, remaining });
+
+  useEffect(() => {
+    if (!active || !endsAt) {
+      setRemaining(0);
+      return;
+    }
+    expiredRef.current = false;
+    const tick = () => {
+      const next = secondsUntil(endsAt);
+      console.info("[CSE Timer] exam update", { remaining: next });
+      setRemaining((current) => (current === next ? current : next));
+      if (next === 0 && !expiredRef.current) {
+        expiredRef.current = true;
+        onExpireRef.current?.();
+      }
+    };
+    tick();
+    const timer = setInterval(tick, 1000);
+    return () => clearInterval(timer);
+  }, [active, endsAt]);
+
+  return <>{formatSeconds(remaining)}</>;
+});
+
 export default function App() {
+  useRenderDiagnostics("App");
   const [progress, setProgress] = useState(loadProgress);
   const [screen, setScreen] = useState("dashboard");
   const [category, setCategory] = useState("All Categories");
@@ -1085,8 +1178,10 @@ export default function App() {
   const [loginHistory, setLoginHistory] = useState([]);
   const [deviceSessions, setDeviceSessions] = useState([]);
   const [cloudLoading, setCloudLoading] = useState(true);
-  const [trialRemaining, setTrialRemaining] = useState(0);
   const [accessMessage, setAccessMessage] = useState("");
+  const cloudRefreshInFlightRef = useRef(false);
+  const loadedSessionKeyRef = useRef("");
+  const authEventCountRef = useRef(0);
   const stats = useMemo(() => analyze(progress), [progress]);
   const allQuestions = useMemo(() => buildQuestionBank(progress), [progress.imports]);
   const readiness = useMemo(() => {
@@ -1179,39 +1274,55 @@ export default function App() {
       setCloudLoading(false);
       return;
     }
+    const sessionKey = `${session.user.id}:${session.access_token?.slice(-18) || "no-token"}`;
+    if (cloudRefreshInFlightRef.current) {
+      authLog("profile refresh skipped: already in flight", { userId: session.user.id });
+      return;
+    }
+    if (loadedSessionKeyRef.current === sessionKey) {
+      authLog("profile refresh skipped: session already loaded", { userId: session.user.id });
+      return;
+    }
+    cloudRefreshInFlightRef.current = true;
+    authLog("profile refresh started", { userId: session.user.id, sessionKey });
     setCloudLoading(true);
-    await ensureCloudProfile(session);
-    const userId = session.user.id;
-    const [profileResult, progressResult, historyResult, deviceResult] = await Promise.all([
-      supabase.from("user_profiles").select("*").eq("user_id", userId).single(),
-      supabase.from("user_progress").select("app_state").eq("user_id", userId).single(),
-      supabase.from("login_history").select("*").eq("user_id", userId).order("created_at", { ascending: false }).limit(30),
-      supabase.from("device_sessions").select("*").eq("user_id", userId).order("last_login", { ascending: false })
-    ]);
-    authLog("post-login query results", {
-      userId,
-      profile: profileResult.data,
-      profileError: profileResult.error,
-      progressError: progressResult.error,
-      historyError: historyResult.error,
-      deviceError: deviceResult.error
-    });
-    authError("profile fetch failed", profileResult.error);
-    authError("progress fetch failed", progressResult.error);
-    authError("login history fetch failed", historyResult.error);
-    authError("device sessions fetch failed", deviceResult.error);
-    const profileRow = profileResult.data;
-    const progressRow = progressResult.data;
-    const historyRows = historyResult.data;
-    const deviceRows = deviceResult.data;
-    if (profileRow) setProfile(profileRow);
-    if (progressRow?.app_state && Object.keys(progressRow.app_state).length) setProgress({ ...initialProgress, ...progressRow.app_state });
-    setLoginHistory(historyRows || []);
-    setDeviceSessions(deviceRows || []);
-    await registerDeviceSession(userId);
-    if (profileRow?.role === "Admin") await loadAdminUsers();
-    setScreen("dashboard");
-    setCloudLoading(false);
+    try {
+      await ensureCloudProfile(session);
+      const userId = session.user.id;
+      const [profileResult, progressResult, historyResult, deviceResult] = await Promise.all([
+        supabase.from("user_profiles").select("*").eq("user_id", userId).single(),
+        supabase.from("user_progress").select("app_state").eq("user_id", userId).single(),
+        supabase.from("login_history").select("*").eq("user_id", userId).order("created_at", { ascending: false }).limit(30),
+        supabase.from("device_sessions").select("*").eq("user_id", userId).order("last_login", { ascending: false })
+      ]);
+      authLog("post-login query results", {
+        userId,
+        profile: profileResult.data,
+        profileError: profileResult.error,
+        progressError: progressResult.error,
+        historyError: historyResult.error,
+        deviceError: deviceResult.error
+      });
+      authError("profile fetch failed", profileResult.error);
+      authError("progress fetch failed", progressResult.error);
+      authError("login history fetch failed", historyResult.error);
+      authError("device sessions fetch failed", deviceResult.error);
+      const profileRow = profileResult.data;
+      const progressRow = progressResult.data;
+      const historyRows = historyResult.data;
+      const deviceRows = deviceResult.data;
+      if (profileRow) setProfile(profileRow);
+      if (progressRow?.app_state && Object.keys(progressRow.app_state).length) setProgress({ ...initialProgress, ...progressRow.app_state });
+      setLoginHistory(historyRows || []);
+      setDeviceSessions(deviceRows || []);
+      await registerDeviceSession(userId);
+      if (profileRow?.role === "Admin") await loadAdminUsers();
+      loadedSessionKeyRef.current = sessionKey;
+      setScreen("dashboard");
+    } finally {
+      cloudRefreshInFlightRef.current = false;
+      setCloudLoading(false);
+    }
   }
 
   async function registerDeviceSession(userId) {
@@ -1261,7 +1372,9 @@ export default function App() {
       else setCloudLoading(false);
     });
     const { data: listener } = supabase.auth.onAuthStateChange((event, session) => {
-      authLog("auth state change", { event, hasSession: Boolean(session), userId: session?.user?.id });
+      authEventCountRef.current += 1;
+      if (typeof window !== "undefined" && window.__CSE_RENDER_DIAGNOSTICS__) window.__CSE_RENDER_DIAGNOSTICS__.auth = authEventCountRef.current;
+      authLog("auth state change", { event, count: authEventCountRef.current, hasSession: Boolean(session), userId: session?.user?.id });
       if (event === "SIGNED_OUT") setAccessMessage("");
       setAuthSession(session);
       if (session) refreshCloudState(session);
@@ -1273,24 +1386,15 @@ export default function App() {
     return () => listener.subscription.unsubscribe();
   }, []);
 
-  useEffect(() => {
-    if (!profile?.trial_expires_at || profile.status !== "Trial Active") {
-      setTrialRemaining(0);
-      return;
+  const handleTrialExpired = useCallback(() => {
+    if (!profile?.user_id || profile.status !== "Trial Active") return;
+    console.info("[CSE Timer] trial expired", { userId: profile.user_id });
+    setAccessMessage("Your trial access has ended. Please contact the administrator for full access.");
+    setProfile((current) => current?.user_id === profile.user_id ? { ...current, status: "Expired" } : current);
+    if (supabase) {
+      supabase.from("user_profiles").update({ status: "Expired" }).eq("user_id", profile.user_id);
     }
-    const tick = () => {
-      const remaining = Math.max(0, Math.floor((new Date(profile.trial_expires_at).getTime() - Date.now()) / 1000));
-      setTrialRemaining(remaining);
-      if (remaining === 0 && supabase) {
-        setAccessMessage("Your trial access has ended. Please contact the administrator for full access.");
-        supabase.from("user_profiles").update({ status: "Expired" }).eq("user_id", profile.user_id);
-        supabase.auth.signOut();
-      }
-    };
-    tick();
-    const timer = setInterval(tick, 1000);
-    return () => clearInterval(timer);
-  }, [profile?.trial_expires_at, profile?.status]);
+  }, [profile?.user_id, profile?.status]);
 
   useEffect(() => {
     if (!supabase || !authSession?.user || cloudLoading) return;
@@ -1430,26 +1534,15 @@ export default function App() {
     setCategory(nextCategory); setMode(nextMode); setSubCategory(safeSub);
     const timedModes = ["Timed Exam", "Mock Exam 1", "Mock Exam 2", "Mock Exam 3", "Full Mock Exam"];
     const limit = nextMode === "Full Mock Exam" ? 10200 : nextMode === "Mock Exam 3" ? 9000 : nextMode === "Mock Exam 2" ? 6000 : nextMode === "Mock Exam 1" ? 3000 : 7200;
-    setExam({ questions: qs, index: 0, answers: {}, startedAt: Date.now(), currentStartedAt: Date.now(), timeLeft: timedModes.includes(nextMode) ? limit : null, submitted: false });
+    const timed = timedModes.includes(nextMode);
+    setExam({ questions: qs, index: 0, answers: {}, startedAt: Date.now(), currentStartedAt: Date.now(), timeLimit: timed ? limit : null, endsAt: timed ? Date.now() + limit * 1000 : null, submitted: false });
     setScreen("exam");
   }
 
-  useEffect(() => {
-    if (!exam || !["Timed Exam", "Mock Exam 1", "Mock Exam 2", "Mock Exam 3", "Full Mock Exam"].includes(mode) || exam.submitted) return;
-    const t = setInterval(() => {
-      setExam((e) => {
-        if (!e) return e;
-        const left = Math.max(0, e.timeLeft - 1);
-        if (left === 0) return { ...e, timeLeft: 0 };
-        return { ...e, timeLeft: left };
-      });
-    }, 1000);
-    return () => clearInterval(t);
-  }, [exam, mode]);
-
-  useEffect(() => {
-    if (exam && ["Timed Exam", "Mock Exam 1", "Mock Exam 2", "Mock Exam 3", "Full Mock Exam"].includes(mode) && exam.timeLeft === 0 && !exam.submitted) submitExam();
-  }, [exam?.timeLeft]);
+  const handleExamExpired = useCallback(() => {
+    console.info("[CSE Timer] exam expired", { mode, submitted: exam?.submitted });
+    if (!exam?.submitted) submitExam();
+  }, [mode, category, subCategory, exam?.submitted]);
 
   function recordAnswer(q, selected, statusOverride) {
     setExam((e) => {
@@ -1474,7 +1567,7 @@ export default function App() {
   }
 
   function submitExam() {
-    if (!exam) return;
+    if (!exam || exam.submitted) return;
     const finalAnswers = { ...exam.answers };
     exam.questions.forEach((q) => {
       if (!finalAnswers[q.id]) finalAnswers[q.id] = { selected: null, status: "skipped", time: 0, question: q };
@@ -1504,7 +1597,7 @@ export default function App() {
           <button onClick={() => setScreen("learn")} className="rounded-full border border-white/10 bg-white/10 px-3 py-1 text-xs font-semibold text-white/80">Learn</button>
           <button onClick={() => setScreen("admin")} className="rounded-full border border-white/10 bg-white/10 px-3 py-1 text-xs font-semibold text-white/80">Admin Import</button>
           <button onClick={() => setScreen("account")} className="rounded-full border border-white/10 bg-white/10 px-3 py-1 text-xs font-semibold text-white/80">{profile ? profile.full_name : "Gmail Login"}</button>
-          {profile?.status === "Trial Active" && <Pill>Trial {Math.floor(trialRemaining / 60)}:{String(trialRemaining % 60).padStart(2, "0")}</Pill>}
+          {profile?.status === "Trial Active" && <TrialCountdown expiresAt={profile.trial_expires_at} userId={profile.user_id} onExpired={handleTrialExpired} />}
           <Pill><Flame className="mr-1 h-3.5 w-3.5 text-orange-300" />{progress.streak} day streak</Pill><Pill><Trophy className="mr-1 h-3.5 w-3.5 text-amber-300" />{getRank(progress.xp)}</Pill>
         </div>
       </div>
@@ -1641,7 +1734,7 @@ export default function App() {
       <div className="mx-auto max-w-5xl px-4 py-6">
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
           <button onClick={() => setScreen("dashboard")} className="inline-flex items-center gap-2 rounded-2xl border border-white/10 bg-white/10 px-4 py-3 font-bold"><Home className="h-4 w-4" /> Dashboard</button>
-          <div className="flex flex-wrap gap-2"><Pill>{mode}</Pill><Pill><Timer className="mr-1 h-3.5 w-3.5" />{examLike ? `${Math.floor(exam.timeLeft / 60)}:${String(exam.timeLeft % 60).padStart(2, "0")}` : "Unlimited"}</Pill>{examLike ? <Pill>Score hidden until submit</Pill> : <Pill>Score {score}/{exam.questions.length}</Pill>}</div>
+          <div className="flex flex-wrap gap-2"><Pill>{mode}</Pill><Pill><Timer className="mr-1 h-3.5 w-3.5" />{examLike ? <ExamCountdown endsAt={exam.endsAt} active={!exam.submitted} onExpire={handleExamExpired} /> : "Unlimited"}</Pill>{examLike ? <Pill>Score hidden until submit</Pill> : <Pill>Score {score}/{exam.questions.length}</Pill>}</div>
         </div>
         <div className="mb-5 h-3 overflow-hidden rounded-full bg-white/10"><motion.div className="h-full bg-gradient-to-r from-emerald-300 to-cyan-300" animate={{ width: `${((exam.index + 1) / exam.questions.length) * 100}%` }} /></div>
         <AnimatePresence mode="wait">
@@ -1758,7 +1851,7 @@ export default function App() {
           <button onClick={gmailLogin} disabled={!supabaseConfigured} className="min-h-12 rounded-2xl bg-white px-5 font-black text-slate-950 disabled:opacity-50">Continue with Gmail</button>
           {!supabaseConfigured && <p className="mt-3 text-sm text-red-100">Cloud auth is disabled until `.env.local` contains `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY`.</p>}
         </div> : <div className="mt-6 space-y-4">
-          <div className="rounded-2xl bg-slate-900/55 p-5"><h3 className="text-xl font-black">{profile.full_name}</h3><p className="text-sm text-white/60">{profile.gmail_address}</p><div className="mt-3 flex flex-wrap gap-2"><Pill>Status: {profile.status}</Pill><Pill>Role: {profile.role}</Pill><Pill>Registered: {new Date(profile.registration_date).toLocaleDateString()}</Pill><Pill>Max devices: {MAX_ACTIVE_DEVICES}</Pill>{profile.status === "Trial Active" && <Pill>Trial remaining: {Math.floor(trialRemaining / 60)}:{String(trialRemaining % 60).padStart(2, "0")}</Pill>}</div></div>
+          <div className="rounded-2xl bg-slate-900/55 p-5"><h3 className="text-xl font-black">{profile.full_name}</h3><p className="text-sm text-white/60">{profile.gmail_address}</p><div className="mt-3 flex flex-wrap gap-2"><Pill>Status: {profile.status}</Pill><Pill>Role: {profile.role}</Pill><Pill>Registered: {new Date(profile.registration_date).toLocaleDateString()}</Pill><Pill>Max devices: {MAX_ACTIVE_DEVICES}</Pill>{profile.status === "Trial Active" && <TrialCountdown expiresAt={profile.trial_expires_at} userId={profile.user_id} onExpired={handleTrialExpired} prefix="Trial remaining:" />}</div></div>
           <div className="grid gap-3 md:grid-cols-2">{deviceSessions.map((d) => <div key={d.id} className="rounded-2xl bg-slate-900/45 p-4"><b>{d.device_info}</b><p className="text-xs text-white/50">Last login: {new Date(d.last_login).toLocaleString()}</p><p className="text-xs text-white/50">Active: {d.active ? "Yes" : "No"}</p></div>)}</div>
           <div className="rounded-2xl bg-slate-900/45 p-4"><h3 className="mb-2 font-black">Login History</h3>{loginHistory.map((h) => <p key={h.id} className="text-sm text-white/60">{new Date(h.created_at).toLocaleString()} • {h.device_info} • {h.action}</p>)}</div>
           <button onClick={logoutAccount} className="rounded-2xl border border-white/10 bg-white/10 px-5 py-3 font-bold">Logout</button>
@@ -1774,6 +1867,30 @@ export default function App() {
         <h2 className="text-3xl font-black">Cloud Access Required</h2>
         {accessMessage && <div className="mx-auto mt-4 max-w-2xl rounded-2xl border border-amber-200/30 bg-amber-300/10 p-4 text-sm text-amber-100">{accessMessage}</div>}
         <p className="mx-auto mt-3 max-w-2xl text-white/65">{profile?.status === "Expired" ? "Your trial access has ended. Please contact the administrator for full access." : profile?.status === "Suspended" ? "Your account is suspended. Please contact the administrator." : "Please sign in with Gmail. New users receive a 30-minute trial. Approved users receive unlimited access."}</p>
+        {profile?.status === "Expired" && (
+          <div className="mx-auto mt-6 max-w-xl rounded-3xl border border-red-200/25 bg-slate-950/55 p-6 text-left">
+            <h3 className="text-2xl font-black text-red-100">🚫 Trial Expired</h3>
+            <p className="mt-2 text-white/70">Your free trial has ended.</p>
+            <div className="mt-5 rounded-2xl border border-amber-200/25 bg-amber-300/10 p-5 text-center">
+              <p className="text-xs font-black uppercase tracking-widest text-amber-100">PROMO PRICE</p>
+              <p className="mt-1 text-4xl font-black text-white">₱180 ONLY</p>
+              <p className="mt-1 text-sm text-amber-100">First 100 Subscribers Only</p>
+            </div>
+            <div className="mt-5 space-y-2 text-sm text-white/75">
+              <p className="font-black text-white">Unlock:</p>
+              <p>✅ Full Reviewer Access</p>
+              <p>✅ Unlimited Mock Exams</p>
+              <p>✅ Progress Tracking</p>
+              <p>✅ Cloud Save</p>
+              <p>✅ Future Updates</p>
+            </div>
+            <div className="mt-5 rounded-2xl bg-white/10 p-4 text-sm text-white/75">
+              <p>To activate your account, contact:</p>
+              <p className="mt-1 text-lg font-black text-emerald-100">📱 Viber: 0930-197-7614</p>
+              <p className="mt-3">After payment verification, your account will be upgraded to Approved status.</p>
+            </div>
+          </div>
+        )}
         <button onClick={() => setScreen("account")} className="mt-6 rounded-2xl bg-white px-5 py-3 font-black text-slate-950">Go to Gmail Login</button>
       </section>
     </div>
