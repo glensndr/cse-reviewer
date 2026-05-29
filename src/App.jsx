@@ -844,6 +844,7 @@ const initialProgress = {
   imports: [],
   account: null,
   sessions: [],
+  recentQuestionIds: [],
   lastStudyDate: new Date().toISOString().slice(0, 10)
 };
 
@@ -855,7 +856,62 @@ function getRank(xp) {
   return ranks.reduce((best, rank) => (xp >= rank.xp ? rank : best), ranks[0]).name;
 }
 
-function analyze(progress) {
+function normalizeDbQuestion(row) {
+  if (!row) return null;
+  const choices = Array.isArray(row.choices) ? row.choices : [];
+  return makeQuestion({
+    id: row.id,
+    category: row.category,
+    subCategory: row.sub_category || row.subCategory,
+    difficulty: row.difficulty || "Medium",
+    question: row.question,
+    choices,
+    answer: row.answer,
+    explanation: row.explanation,
+    hint: row.hint || "Eliminate choices that do not match the tested rule.",
+    learningTip: row.learning_tip || row.learningTip || "Review the rule, then answer a similar item without looking at the explanation."
+  });
+}
+
+function variantQuestion(base, variantIndex) {
+  const contexts = ["records audit", "frontline service", "permit processing", "budget review", "community program", "procurement check", "citizen complaint", "HR screening", "environmental report", "public assistance"];
+  const context = contexts[variantIndex % contexts.length];
+  const difficulty = DIFFICULTIES[(DIFFICULTIES.indexOf(base.difficulty) + variantIndex) % DIFFICULTIES.length] || base.difficulty;
+  return makeQuestion({
+    ...base,
+    id: `${base.id}-V${variantIndex}`,
+    difficulty,
+    question: `Variant ${variantIndex}: In a ${context} scenario, ${base.question.replace(/^Item\s+[A-Z0-9-]+:\s*/i, "").replace(/^Variant\s+\d+:\s*/i, "")}`,
+    choices: seededShuffle(base.choices, `${base.id}-${variantIndex}-choices`),
+    answer: base.answer,
+    explanation: `${base.explanation} This variation uses a different ${context} context, but the same tested concept applies.`,
+    hint: base.hint,
+    learningTip: `${base.learningTip} Practice the same concept across changed wording so you recognize the rule, not the memorized item.`
+  });
+}
+
+function expandQuestionPool(bank, minimumPerSub = 60) {
+  const expanded = [...bank];
+  const grouped = {};
+  expanded.forEach((q) => {
+    const key = `${q.category}|${q.subCategory}`;
+    (grouped[key] ||= []).push(q);
+  });
+  CATEGORIES.forEach((cat) => cat.subs.forEach((sub) => {
+    const key = `${cat.name}|${sub}`;
+    const source = grouped[key] || [];
+    let variantIndex = 1;
+    while (source.length && (grouped[key]?.length || 0) < minimumPerSub) {
+      const next = variantQuestion(source[(variantIndex - 1) % source.length], variantIndex);
+      expanded.push(next);
+      (grouped[key] ||= []).push(next);
+      variantIndex += 1;
+    }
+  }));
+  return expanded;
+}
+
+function analyze(progress, bank = QUESTION_BANK) {
   const records = Object.values(progress.answered || {});
   const byCategory = {};
   const bySub = {};
@@ -866,7 +922,7 @@ function analyze(progress) {
     const sub = bySub[r.subCategory] || (bySub[r.subCategory] = { total: 0, correct: 0, wrong: 0, skipped: 0, time: 0, category: r.category });
     sub.total += 1; sub.correct += r.status === "correct" ? 1 : 0; sub.wrong += r.status === "wrong" ? 1 : 0; sub.skipped += r.status === "skipped" ? 1 : 0; sub.time += r.time || 0;
   });
-  const categoryStats = Object.entries(byCategory).map(([name, s]) => ({ name, ...s, accuracy: pct(s.correct, s.total), completion: pct(s.total, QUESTION_BANK.filter((q) => q.category === name).length), avgTime: s.total ? Math.round(s.time / s.total) : 0 }));
+  const categoryStats = Object.entries(byCategory).map(([name, s]) => ({ name, ...s, accuracy: pct(s.correct, s.total), completion: pct(s.total, bank.filter((q) => q.category === name).length), avgTime: s.total ? Math.round(s.time / s.total) : 0 }));
   const subStats = Object.entries(bySub).map(([name, s]) => ({ name, ...s, accuracy: pct(s.correct, s.total), avgTime: s.total ? Math.round(s.time / s.total) : 0 }));
   const weakest = subStats.filter((s) => s.total).sort((a, b) => a.accuracy - b.accuracy || b.wrong - a.wrong)[0];
   const strongest = subStats.filter((s) => s.total >= 2).sort((a, b) => b.accuracy - a.accuracy || b.total - a.total)[0];
@@ -877,7 +933,7 @@ function analyze(progress) {
     wrong: records.filter((r) => r.status === "wrong").length,
     skipped: records.filter((r) => r.status === "skipped").length,
     accuracy: pct(correct, total),
-    progress: pct(total, QUESTION_BANK.length),
+    progress: pct(total, bank.length),
     categoryStats,
     subStats,
     weakest,
@@ -886,8 +942,9 @@ function analyze(progress) {
   };
 }
 
-function buildQuestionBank(progress) {
-  return [...QUESTION_BANK, ...(progress.imports || []).flatMap((item) => generatedFromImport(item, 12))];
+function buildQuestionBank(progress, cloudRows = []) {
+  const cloudQuestions = (cloudRows || []).map(normalizeDbQuestion).filter(Boolean);
+  return [...QUESTION_BANK, ...cloudQuestions, ...(progress.imports || []).flatMap((item) => generatedFromImport(item, 24))];
 }
 
 function questionSignature(q) {
@@ -904,10 +961,13 @@ function answerSetSignature(q) {
 
 function uniqueSessionQuestions(pool, count, progress, seed) {
   const answered = progress.answered || {};
+  const recent = new Set(progress.recentQuestionIds || []);
   const ordered = seededShuffle(pool, seed).sort((a, b) => {
     const aSeen = answered[a.id] ? 1 : 0;
     const bSeen = answered[b.id] ? 1 : 0;
-    return aSeen - bSeen;
+    const aRecent = recent.has(a.id) ? 1 : 0;
+    const bRecent = recent.has(b.id) ? 1 : 0;
+    return aRecent - bRecent || aSeen - bSeen;
   });
   const picked = [];
   const seenQuestion = new Set();
@@ -954,11 +1014,27 @@ function mergeUniqueQuestions(initial, candidates, count, seed) {
   return result;
 }
 
-function selectQuestions(category, mode, progress, subCategory = "All Topics") {
-  const bank = buildQuestionBank(progress);
+function balancedMockQuestions(bank, mode, progress, count) {
+  const categoryTargets = CATEGORIES.map((cat, idx) => ({ cat, count: mode === "Full Mock Exam" ? (idx === 3 ? 35 : 45) : Math.floor(count / CATEGORIES.length) + (idx < count % CATEGORIES.length ? 1 : 0) }));
+  const picked = [];
+  categoryTargets.forEach(({ cat, count: catCount }) => {
+    const perDifficulty = { Easy: Math.ceil(catCount * 0.3), Medium: Math.ceil(catCount * 0.45), Hard: catCount };
+    const catPool = bank.filter((q) => q.category === cat.name);
+    const parts = [
+      uniqueSessionQuestions(catPool.filter((q) => q.difficulty === "Easy"), perDifficulty.Easy, progress, `${mode}-${cat.name}-easy-${Date.now()}`),
+      uniqueSessionQuestions(catPool.filter((q) => q.difficulty === "Medium"), perDifficulty.Medium, progress, `${mode}-${cat.name}-medium-${Date.now()}`),
+      uniqueSessionQuestions(catPool.filter((q) => q.difficulty === "Hard"), perDifficulty.Hard, progress, `${mode}-${cat.name}-hard-${Date.now()}`)
+    ].flat();
+    picked.push(...mergeUniqueQuestions(parts, catPool, catCount, `${mode}-${cat.name}-balance-${Date.now()}`));
+  });
+  return mergeUniqueQuestions([], picked, count, `${mode}-final-${Date.now()}`);
+}
+
+function selectQuestions(category, mode, progress, subCategory = "All Topics", bankOverride = null) {
+  const bank = bankOverride || buildQuestionBank(progress);
   let pool = bank.filter((q) => (category === "All Categories" || q.category === category) && (subCategory === "All Topics" || q.subCategory === subCategory));
   if (mode === "Full Mock Exam") {
-    return CATEGORIES.flatMap((cat, idx) => uniqueSessionQuestions(bank.filter((q) => q.category === cat.name), idx === 0 ? 45 : idx === 1 ? 45 : idx === 2 ? 45 : 35, progress, `${mode}-${cat.name}-${Date.now()}`)).slice(0, 170);
+    return balancedMockQuestions(bank, mode, progress, 170);
   }
   if (mode === "Wrong Drill") {
     const wrongIds = Object.entries(progress.answered || {})
@@ -974,7 +1050,8 @@ function selectQuestions(category, mode, progress, subCategory = "All Topics") {
     const weakPool = pool.filter((q) => weakSubs.includes(q.subCategory) || weakIds.includes(q.id));
     pool = weakPool.length >= 8 ? weakPool : pool.filter((q) => q.difficulty !== "Easy").concat(weakPool);
   }
-  const count = mode === "Mini Quiz" ? 5 : mode === "Mock Exam 1" ? 50 : mode === "Mock Exam 2" ? 100 : mode === "Mock Exam 3" ? 150 : mode === "Timed Exam" ? 60 : mode === "Wrong Drill" ? 30 : mode === "Mastery Test" ? 40 : 16;
+  const count = mode === "Quick Review" ? 10 : mode === "Mini Quiz" ? 20 : mode === "Mock Exam 1" ? 50 : mode === "Mock Exam 2" ? 100 : mode === "Mock Exam 3" ? 150 : mode === "Timed Exam" ? 60 : mode === "Wrong Drill" ? 30 : mode === "Mastery Test" ? 50 : 16;
+  if (mode.includes("Mock Exam")) return balancedMockQuestions(bank, mode, progress, count);
   let selected = uniqueSessionQuestions(pool, count, progress, `${mode}-${category}-${subCategory}-${Date.now()}`);
   if (selected.length < count && subCategory !== "All Topics") {
     const fallback = bank.filter((q) => q.category === category && q.subCategory !== subCategory);
@@ -1022,6 +1099,22 @@ function choiceInsight(q, choice, index) {
   if (q.category === "Verbal Ability") return `${choiceLetters[index]} is wrong because it does not fit the sentence context, grammar pattern, tone, or passage evidence as well as the correct answer.`;
   if (q.category === "General Information") return `${choiceLetters[index]} is wrong because it points to a different public-service principle or contradicts the government situation described.`;
   return `${choiceLetters[index]} is wrong because it uses the wrong relationship, operation, or assumption for this item.`;
+}
+
+function masteryLevel(accuracy, total) {
+  if (!total || accuracy <= 39) return "Beginner";
+  if (accuracy <= 59) return "Developing";
+  if (accuracy <= 79) return "Proficient";
+  return "Mastered";
+}
+
+function topicTrend(progress, subCategory) {
+  const rows = Object.values(progress.answered || {}).filter((r) => r.subCategory === subCategory).sort((a, b) => new Date(a.date || 0) - new Date(b.date || 0));
+  if (rows.length < 4) return 0;
+  const half = Math.floor(rows.length / 2);
+  const early = rows.slice(0, half);
+  const recent = rows.slice(-half);
+  return pct(recent.filter((r) => r.status === "correct").length, recent.length) - pct(early.filter((r) => r.status === "correct").length, early.length);
 }
 
 function achievementList(progress, stats) {
@@ -1232,14 +1325,15 @@ export default function App() {
   const [cloudUsers, setCloudUsers] = useState([]);
   const [loginHistory, setLoginHistory] = useState([]);
   const [deviceSessions, setDeviceSessions] = useState([]);
+  const [cloudQuestionRows, setCloudQuestionRows] = useState([]);
   const [cloudLoading, setCloudLoading] = useState(true);
   const [accessMessage, setAccessMessage] = useState("");
   const cloudRefreshInFlightRef = useRef(false);
   const loadedSessionKeyRef = useRef("");
   const authEventCountRef = useRef(0);
   const profileLoadedRef = useRef(false);
-  const stats = useMemo(() => analyze(progress), [progress]);
-  const allQuestions = useMemo(() => buildQuestionBank(progress), [progress.imports]);
+  const allQuestions = useMemo(() => expandQuestionPool(buildQuestionBank(progress, cloudQuestionRows), 60), [progress.imports, cloudQuestionRows]);
+  const stats = useMemo(() => analyze(progress, allQuestions), [progress, allQuestions]);
   const readiness = useMemo(() => {
     const mockCompleted = progress.sessions.filter((s) => s.mode?.includes("Mock") || s.mode === "Full Mock Exam").length;
     const masteryPassed = progress.sessions.filter((s) => s.mode === "Mastery Test" && s.accuracy >= 80).length;
@@ -1367,11 +1461,12 @@ export default function App() {
     try {
       await ensureCloudProfile(session);
       const userId = session.user.id;
-      const [profileResult, progressResult, historyResult, deviceResult] = await Promise.all([
+      const [profileResult, progressResult, historyResult, deviceResult, questionBankResult] = await Promise.all([
         supabase.from("user_profiles").select("*").eq("user_id", userId).single(),
         supabase.from("user_progress").select("app_state").eq("user_id", userId).single(),
         supabase.from("login_history").select("*").eq("user_id", userId).order("created_at", { ascending: false }).limit(30),
-        supabase.from("device_sessions").select("*").eq("user_id", userId).order("last_login", { ascending: false })
+        supabase.from("device_sessions").select("*").eq("user_id", userId).order("last_login", { ascending: false }),
+        supabase.from("question_bank").select("*").limit(5000)
       ]);
       authLog("post-login query results", {
         userId,
@@ -1379,12 +1474,15 @@ export default function App() {
         profileError: profileResult.error,
         progressError: progressResult.error,
         historyError: historyResult.error,
-        deviceError: deviceResult.error
+        deviceError: deviceResult.error,
+        questionBankError: questionBankResult.error,
+        questionBankCount: questionBankResult.data?.length || 0
       });
       authError("profile fetch failed", profileResult.error);
       authError("progress fetch failed", progressResult.error);
       authError("login history fetch failed", historyResult.error);
       authError("device sessions fetch failed", deviceResult.error);
+      authError("question bank fetch failed", questionBankResult.error);
       const profileRow = profileResult.data;
       const progressRow = progressResult.data;
       const historyRows = historyResult.data;
@@ -1396,6 +1494,7 @@ export default function App() {
       if (progressRow?.app_state && Object.keys(progressRow.app_state).length) setProgress({ ...initialProgress, ...progressRow.app_state });
       setLoginHistory(historyRows || []);
       setDeviceSessions(deviceRows || []);
+      setCloudQuestionRows(questionBankResult.data || []);
       await registerDeviceSession(userId);
       if (profileRow?.role === "Admin") await loadAdminUsers();
       loadedSessionKeyRef.current = sessionKey;
@@ -1616,7 +1715,7 @@ export default function App() {
 
   function startExam(nextCategory = category, nextMode = mode, nextSubCategory = subCategory) {
     const safeSub = nextCategory === "All Categories" && nextMode === "Full Mock Exam" ? "All Topics" : nextSubCategory;
-    const qs = selectQuestions(nextCategory, nextMode, progress, safeSub);
+    const qs = selectQuestions(nextCategory, nextMode, progress, safeSub, allQuestions);
     setCategory(nextCategory); setMode(nextMode); setSubCategory(safeSub);
     const timedModes = ["Timed Exam", "Mock Exam 1", "Mock Exam 2", "Mock Exam 3", "Full Mock Exam"];
     const limit = nextMode === "Full Mock Exam" ? 10200 : nextMode === "Mock Exam 3" ? 9000 : nextMode === "Mock Exam 2" ? 6000 : nextMode === "Mock Exam 1" ? 3000 : 7200;
@@ -1666,7 +1765,7 @@ export default function App() {
         answered[id] = { selected: a.selected, status: a.status, time: a.time, category: a.question.category, subCategory: a.question.subCategory, difficulty: a.question.difficulty, date: new Date().toISOString() };
         if (mode === "Wrong Drill") drillMastery[id] = a.status === "correct" ? (drillMastery[id] || 0) + 1 : 0;
       });
-      return { ...p, xp: p.xp + correct * 12 + (pct(correct, exam.questions.length) >= 80 ? 120 : 30), drillMastery, answered, sessions: [...p.sessions, { date: new Date().toISOString(), category, subCategory, mode, score: correct, total: exam.questions.length, skipped: Object.values(finalAnswers).filter((a) => a.status === "skipped").length, accuracy: pct(correct, exam.questions.length) }].slice(-20) };
+      return { ...p, xp: p.xp + correct * 12 + (pct(correct, exam.questions.length) >= 80 ? 120 : 30), drillMastery, answered, recentQuestionIds: [...exam.questions.map((q) => q.id), ...(p.recentQuestionIds || [])].slice(0, 240), sessions: [...p.sessions, { date: new Date().toISOString(), category, subCategory, mode, score: correct, total: exam.questions.length, skipped: Object.values(finalAnswers).filter((a) => a.status === "skipped").length, accuracy: pct(correct, exam.questions.length) }].slice(-20) };
     });
     setExam((e) => ({ ...e, answers: finalAnswers, submitted: true }));
     setScreen("results");
@@ -1698,7 +1797,7 @@ export default function App() {
     return (
     <div className="mx-auto max-w-7xl px-4 py-8">
       <div className="grid gap-4 lg:grid-cols-[1.35fr_.65fr]">
-        <motion.section initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} className="overflow-hidden rounded-[2rem] border border-white/10 bg-white/[.08] p-6 shadow-2xl backdrop-blur-xl">
+        <motion.section initial={false} animate={{ opacity: 1, y: 0 }} className="overflow-hidden rounded-[2rem] border border-white/10 bg-white/[.08] p-6 shadow-2xl backdrop-blur-xl">
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div><p className="mb-2 text-sm font-semibold text-emerald-200">Premium CBT mastery trainer</p><h2 className="max-w-3xl text-3xl font-black leading-tight sm:text-5xl">Master one topic at a time, then face the exam with calm precision.</h2></div>
             <Ring value={stats.accuracy} label="Accuracy" />
@@ -1756,7 +1855,7 @@ export default function App() {
           const Icon = cat.icon;
           const weakness = s.total && s.accuracy < 70;
           return (
-            <motion.button key={cat.name} initial={{ opacity: 0, y: 18 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: idx * .05 }} onClick={() => { setCategory(cat.name); setSubCategory("All Topics"); setMode("Practice"); startExam(cat.name, "Practice", "All Topics"); }} className="group rounded-[1.5rem] border border-white/10 bg-white/[.07] p-5 text-left backdrop-blur-xl transition hover:-translate-y-1 hover:bg-white/[.11]">
+            <motion.button key={cat.name} initial={false} animate={{ opacity: 1, y: 0 }} transition={{ delay: idx * .05 }} onClick={() => { setCategory(cat.name); setSubCategory("All Topics"); setMode("Practice"); startExam(cat.name, "Practice", "All Topics"); }} className="group rounded-[1.5rem] border border-white/10 bg-white/[.07] p-5 text-left backdrop-blur-xl transition hover:-translate-y-1 hover:bg-white/[.11]">
               <div className={`mb-5 grid h-12 w-12 place-items-center rounded-2xl bg-gradient-to-br ${cat.accent} text-slate-950`}><Icon /></div>
               <h4 className="text-lg font-black">{cat.name}</h4>
               <p className="mt-1 min-h-10 text-sm text-white/55">{cat.subs.slice(0, 4).join(" • ")}</p>
@@ -1878,6 +1977,11 @@ export default function App() {
 
   const Review = () => {
     useRenderDiagnostics("Reviewer", { filter: reviewFilter });
+    const weakestTopics = stats.subStats.filter((s) => s.total).sort((a, b) => a.accuracy - b.accuracy || b.wrong - a.wrong).slice(0, 5);
+    const improvedTopics = stats.subStats.map((s) => ({ ...s, trend: topicTrend(progress, s.name) })).filter((s) => s.trend > 0).sort((a, b) => b.trend - a.trend).slice(0, 5);
+    const recommendedTopic = weakestTopics[0]?.name || CATEGORIES[0].subs[0];
+    const recommendedCategory = CATEGORIES.find((cat) => cat.subs.includes(recommendedTopic))?.name || "All Categories";
+    const strongTopics = stats.subStats.filter((s) => s.total >= 3).sort((a, b) => b.accuracy - a.accuracy).slice(0, 3);
     const savedRows = Object.entries(progress.answered || {}).map(([id, row]) => {
       const q = allQuestions.find((item) => item.id === id);
       return q ? { selected: row.selected, status: row.status, time: row.time, question: q } : null;
@@ -1888,7 +1992,7 @@ export default function App() {
     }).filter(Boolean);
     const answerRows = exam ? exam.questions.map((q) => exam.answers[q.id] || { selected: null, status: "unanswered", time: 0, question: q }) : [...savedRows, ...bookmarkRows];
     const rows = answerRows.filter((a) => reviewFilter === "All" || (reviewFilter === "Bookmarked" ? progress.bookmarks?.[a.question.id] : a.status === reviewFilter.toLowerCase()));
-    return <div className="mx-auto max-w-5xl px-4 py-8"><div className="mb-4 flex flex-wrap justify-between gap-3"><h2 className="text-2xl font-black">Question Review Center</h2><div className="flex flex-wrap gap-2">{["All", "Correct", "Wrong", "Skipped", "Unanswered", "Bookmarked"].map((f) => <button key={f} onClick={() => setReviewFilter(f)} className={`rounded-xl px-4 py-2 text-sm font-bold ${reviewFilter === f ? "bg-white text-slate-950" : "bg-white/10"}`}>{f}</button>)}</div></div><div className="space-y-4">{rows.map((a) => <div key={a.question.id} className="rounded-2xl border border-white/10 bg-white/[.07] p-5"><div className="mb-2 flex flex-wrap gap-2"><Pill>{a.status}</Pill><Pill>{a.question.category}</Pill><Pill>{a.question.subCategory}</Pill>{progress.bookmarks?.[a.question.id] && <Pill>Bookmarked</Pill>}</div><h3 className="font-black">{a.question.question}</h3><p className="mt-2 text-sm text-white/65">Your answer: <b>{a.selected || "Skipped"}</b> • Correct answer: <b className="text-emerald-200">{a.question.answer}</b></p><p className="mt-3 text-sm leading-7 text-white/70">{a.question.explanation}</p><div className="mt-3 grid gap-2">{a.question.choices.map((choice, idx) => <p key={choice} className="rounded-xl bg-white/5 p-3 text-xs text-white/60">{choiceInsight(a.question, choice, idx)}</p>)}</div><p className="mt-2 text-sm text-cyan-100"><b>Tip:</b> {a.question.learningTip}</p></div>)}</div></div>;
+    return <div className="mx-auto max-w-6xl px-4 py-8"><div className="mb-4 flex flex-wrap justify-between gap-3"><h2 className="text-2xl font-black">Smart Review Center</h2><div className="flex flex-wrap gap-2">{["All", "Correct", "Wrong", "Skipped", "Unanswered", "Bookmarked"].map((f) => <button key={f} onClick={() => setReviewFilter(f)} className={`rounded-xl px-4 py-2 text-sm font-bold ${reviewFilter === f ? "bg-white text-slate-950" : "bg-white/10"}`}>{f}</button>)}</div></div><section className="mb-5 grid gap-4 lg:grid-cols-3"><div className="rounded-2xl border border-white/10 bg-white/[.07] p-5"><h3 className="font-black">Weakest Topics</h3>{weakestTopics.map((s) => <p key={s.name} className="mt-2 text-sm text-white/65">{s.name}: {s.accuracy}%</p>)}{!weakestTopics.length && <p className="mt-2 text-sm text-white/55">Answer more questions to unlock weak topic analysis.</p>}</div><div className="rounded-2xl border border-white/10 bg-white/[.07] p-5"><h3 className="font-black">Most Improved Topics</h3>{improvedTopics.map((s) => <p key={s.name} className="mt-2 text-sm text-emerald-100">{s.name}: +{s.trend}%</p>)}{!improvedTopics.length && <p className="mt-2 text-sm text-white/55">Recent improvement trends appear after more attempts.</p>}</div><div className="rounded-2xl border border-white/10 bg-white/[.07] p-5"><h3 className="font-black">Mock Exam Readiness</h3><p className="mt-2 text-sm text-white/65">Readiness Score: {readiness.score}%</p><p className="mt-2 text-sm text-white/65">Recommended next topic: {recommendedTopic}</p><p className="mt-2 text-xs text-white/45">Strong areas: {strongTopics.map((s) => s.name).join(", ") || "Not enough data yet"}</p></div><div className="rounded-2xl border border-white/10 bg-white/[.07] p-5 lg:col-span-3"><h3 className="font-black">Daily Study Plan</h3><p className="mt-2 text-sm text-white/65">Review {recommendedTopic}, answer a Quick Review, then take a Mini Quiz. If accuracy reaches 80%, proceed to Mastery Test.</p><div className="mt-4 flex flex-wrap gap-3"><button onClick={() => startExam(recommendedCategory, "Quick Review", recommendedTopic)} className="rounded-2xl bg-white px-5 py-3 font-bold text-slate-950">Quick Review: 10 Questions</button><button onClick={() => startExam(recommendedCategory, "Mini Quiz", recommendedTopic)} className="rounded-2xl bg-emerald-300 px-5 py-3 font-black text-slate-950">Mini Quiz: 20 Questions</button><button onClick={() => startExam(recommendedCategory, "Mastery Test", recommendedTopic)} className="rounded-2xl border border-white/10 bg-white/10 px-5 py-3 font-bold">Mastery Test: 50 Questions</button></div></div></section><div className="space-y-4">{rows.map((a) => <div key={a.question.id} className="rounded-2xl border border-white/10 bg-white/[.07] p-5"><div className="mb-2 flex flex-wrap gap-2"><Pill>{a.status}</Pill><Pill>{a.question.category}</Pill><Pill>{a.question.subCategory}</Pill>{progress.bookmarks?.[a.question.id] && <Pill>Bookmarked</Pill>}</div><h3 className="font-black">{a.question.question}</h3><p className="mt-2 text-sm text-white/65">Your answer: <b>{a.selected || "Skipped"}</b> • Correct answer: <b className="text-emerald-200">{a.question.answer}</b></p><p className="mt-3 text-sm leading-7 text-white/70">{a.question.explanation}</p><div className="mt-3 grid gap-2">{a.question.choices.map((choice, idx) => <p key={choice} className="rounded-xl bg-white/5 p-3 text-xs text-white/60">{choiceInsight(a.question, choice, idx)}</p>)}</div><p className="mt-2 text-sm text-cyan-100"><b>Tip:</b> {a.question.learningTip}</p></div>)}</div></div>;
   };
 
   const Learn = () => {
