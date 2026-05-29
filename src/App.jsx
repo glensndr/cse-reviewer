@@ -178,13 +178,11 @@ const NUMERICAL_LESSON_DETAILS = {
 };
 
 const DIFFICULTIES = ["Easy", "Medium", "Hard"];
-const ranks = [
-  { name: "Beginner", xp: 0 },
-  { name: "Apprentice", xp: 600 },
-  { name: "Skilled Examinee", xp: 1600 },
-  { name: "Advanced Examinee", xp: 3200 },
-  { name: "Elite Examinee", xp: 5600 },
-  { name: "Civil Service Master", xp: 9000 }
+const rankLevels = [
+  { name: "Beginner", threshold: 0 },
+  { name: "Developing", threshold: 40 },
+  { name: "Proficient", threshold: 60 },
+  { name: "Mastered", threshold: 80 }
 ];
 
 const choiceLetters = ["A", "B", "C", "D"];
@@ -852,8 +850,21 @@ function loadProgress() {
   return initialProgress;
 }
 
-function getRank(xp) {
-  return ranks.reduce((best, rank) => (xp >= rank.xp ? rank : best), ranks[0]).name;
+function getRankInfo(stats, progress, readiness) {
+  const sessions = progress.sessions || [];
+  const masteryTests = sessions.filter((s) => s.mode === "Mastery Test");
+  const mockExams = sessions.filter((s) => s.mode?.includes("Mock"));
+  const masteryScore = masteryTests.length ? Math.round(masteryTests.reduce((sum, s) => sum + (s.accuracy || 0), 0) / masteryTests.length) : 0;
+  const mockScore = mockExams.length ? Math.round(mockExams.reduce((sum, s) => sum + (s.accuracy || 0), 0) / mockExams.length) : 0;
+  const answeredScore = Math.min(100, Math.round((stats.total / 300) * 100));
+  const score = Math.round((stats.accuracy * 0.35) + (answeredScore * 0.2) + (masteryScore * 0.15) + (mockScore * 0.15) + (readiness.score * 0.15));
+  const currentIndex = rankLevels.reduce((idx, rank, i) => (score >= rank.threshold ? i : idx), 0);
+  const current = rankLevels[currentIndex];
+  const next = rankLevels[currentIndex + 1] || null;
+  const previousThreshold = current.threshold;
+  const nextThreshold = next?.threshold ?? 100;
+  const progressToNext = next ? Math.min(100, Math.round(((score - previousThreshold) / (nextThreshold - previousThreshold)) * 100)) : 100;
+  return { score, current: current.name, next: next?.name || "Top rank", progressToNext, formula: { accuracy: stats.accuracy, answeredScore, masteryScore, mockScore, readinessScore: readiness.score } };
 }
 
 function normalizeDbQuestion(row) {
@@ -944,7 +955,7 @@ function analyze(progress, bank = QUESTION_BANK) {
 
 function buildQuestionBank(progress, cloudRows = []) {
   const cloudQuestions = (cloudRows || []).map(normalizeDbQuestion).filter(Boolean);
-  return [...QUESTION_BANK, ...cloudQuestions, ...(progress.imports || []).flatMap((item) => generatedFromImport(item, 24))];
+  return [...QUESTION_BANK, ...cloudQuestions, ...(progress.imports || []).flatMap((item) => generatedFromImport(item, Math.max(80, ((item.topics || []).length || 4) * 50)))];
 }
 
 function questionSignature(q) {
@@ -1050,7 +1061,7 @@ function selectQuestions(category, mode, progress, subCategory = "All Topics", b
     const weakPool = pool.filter((q) => weakSubs.includes(q.subCategory) || weakIds.includes(q.id));
     pool = weakPool.length >= 8 ? weakPool : pool.filter((q) => q.difficulty !== "Easy").concat(weakPool);
   }
-  const count = mode === "Quick Review" ? 10 : mode === "Mini Quiz" ? 20 : mode === "Mock Exam 1" ? 50 : mode === "Mock Exam 2" ? 100 : mode === "Mock Exam 3" ? 150 : mode === "Timed Exam" ? 60 : mode === "Wrong Drill" ? 30 : mode === "Mastery Test" ? 50 : 16;
+  const count = mode === "Quick Review" ? 10 : mode === "Mini Quiz" ? 20 : mode === "Mock Exam 1" ? 50 : mode === "Mock Exam 2" ? 100 : mode === "Mock Exam 3" ? 150 : mode === "Timed Exam" ? 60 : mode === "Wrong Drill" ? 30 : mode === "Mastery Test" ? 50 : 25;
   if (mode.includes("Mock Exam")) return balancedMockQuestions(bank, mode, progress, count);
   let selected = uniqueSessionQuestions(pool, count, progress, `${mode}-${category}-${subCategory}-${Date.now()}`);
   if (selected.length < count && subCategory !== "All Topics") {
@@ -1172,99 +1183,16 @@ function secondsUntil(isoOrMs) {
   return Math.max(0, Math.floor((target - Date.now()) / 1000));
 }
 
-function useRenderDiagnostics(name, details = {}) {
-  const countRef = useRef(0);
-  useEffect(() => {
-    if (typeof window !== "undefined") {
-      window.__CSE_RENDER_DIAGNOSTICS__ = window.__CSE_RENDER_DIAGNOSTICS__ || { total: 0, components: {}, timers: 0, auth: 0 };
-      window.__CSE_RENDER_DIAGNOSTICS__.events = window.__CSE_RENDER_DIAGNOSTICS__.events || [];
-      window.__CSE_RENDER_DIAGNOSTICS__.profileFetches = window.__CSE_RENDER_DIAGNOSTICS__.profileFetches || 0;
-      window.__CSE_RENDER_DIAGNOSTICS__.sessionFetches = window.__CSE_RENDER_DIAGNOSTICS__.sessionFetches || 0;
-      window.__CSE_RENDER_DIAGNOSTICS__.stateChanges = window.__CSE_RENDER_DIAGNOSTICS__.stateChanges || 0;
-      window.__CSE_RENDER_DIAGNOSTICS__.components[name] = window.__CSE_RENDER_DIAGNOSTICS__.components[name] || 0;
-    }
-    console.info(`[CSE Render] ${name} mounted`, details);
-    return () => console.info(`[CSE Render] ${name} unmounted`);
-  }, []);
-  countRef.current += 1;
-  useEffect(() => {
-    if (typeof window !== "undefined") {
-      const diagnostics = window.__CSE_RENDER_DIAGNOSTICS__;
-      if (diagnostics) {
-        diagnostics.total += 1;
-        diagnostics.components[name] = countRef.current;
-        if (name.includes("Countdown")) diagnostics.timers += 1;
-        console.info("[CSE Diagnostics]", diagnostics);
-      }
-    }
-    console.info(`[CSE Render] ${name} rerender #${countRef.current}`, details);
-  });
-  return countRef.current;
-}
-
-function markDiagnostic(type, name, payload = {}) {
-  if (typeof window === "undefined") return;
-  window.__CSE_RENDER_DIAGNOSTICS__ = window.__CSE_RENDER_DIAGNOSTICS__ || { total: 0, components: {}, timers: 0, auth: 0, profileFetches: 0, sessionFetches: 0, stateChanges: 0, events: [] };
-  const diagnostics = window.__CSE_RENDER_DIAGNOSTICS__;
-  if (type === "profileFetch") diagnostics.profileFetches += 1;
-  if (type === "sessionFetch") diagnostics.sessionFetches += 1;
-  if (type === "auth") diagnostics.auth += 1;
-  if (type === "state") diagnostics.stateChanges += 1;
-  diagnostics.events = [{ at: new Date().toLocaleTimeString(), type, name, payload }, ...(diagnostics.events || [])].slice(0, 8);
-  console.info(`[CSE Diagnostic] ${type}: ${name}`, payload);
-}
-
-const DebugOverlay = memo(function DebugOverlay() {
-  const [snapshot, setSnapshot] = useState(null);
-  useRenderDiagnostics("DebugOverlay", { visible: true });
-
-  useEffect(() => {
-    const timer = setInterval(() => {
-      if (typeof window === "undefined") return;
-      const source = window.__CSE_RENDER_DIAGNOSTICS__;
-      if (!source) return;
-      setSnapshot({
-        total: source.total || 0,
-        profileFetches: source.profileFetches || 0,
-        sessionFetches: source.sessionFetches || 0,
-        auth: source.auth || 0,
-        stateChanges: source.stateChanges || 0,
-        components: { ...(source.components || {}) },
-        events: [...(source.events || [])]
-      });
-    }, 700);
-    return () => clearInterval(timer);
-  }, []);
-
-  if (!snapshot) return null;
-  return (
-    <div className="fixed bottom-3 right-3 z-50 max-w-xs rounded-2xl border border-white/15 bg-slate-950/90 p-3 text-[11px] text-white/75 shadow-2xl backdrop-blur-xl">
-      <div className="mb-2 font-black text-cyan-100">Render Debug</div>
-      <div className="grid grid-cols-2 gap-x-3 gap-y-1">
-        <span>Total renders</span><b>{snapshot.total}</b>
-        <span>Profile fetches</span><b>{snapshot.profileFetches}</b>
-        <span>Session fetches</span><b>{snapshot.sessionFetches}</b>
-        <span>Auth events</span><b>{snapshot.auth}</b>
-      </div>
-      <div className="mt-2 max-h-24 overflow-auto border-t border-white/10 pt-2">
-        {snapshot.events.map((event, idx) => <div key={`${event.at}-${idx}`} className="truncate">{event.at} {event.type}: {event.name}</div>)}
-      </div>
-    </div>
-  );
-});
-
 const TrialCountdown = memo(function TrialCountdown({ expiresAt, userId, onExpired, prefix = "Trial" }) {
   const [remaining, setRemaining] = useState(() => secondsUntil(expiresAt));
   const expiredRef = useRef(false);
   const onExpiredRef = useRef(onExpired);
   onExpiredRef.current = onExpired;
-  useRenderDiagnostics("TrialCountdown", { userId, expiresAt, remaining });
 
   useEffect(() => {
     expiredRef.current = false;
     const tick = () => {
       const next = secondsUntil(expiresAt);
-      console.info("[CSE Timer] trial update", { userId, remaining: next });
       setRemaining((current) => (current === next ? current : next));
       if (next === 0 && !expiredRef.current) {
         expiredRef.current = true;
@@ -1284,7 +1212,6 @@ const ExamCountdown = memo(function ExamCountdown({ endsAt, active, onExpire }) 
   const expiredRef = useRef(false);
   const onExpireRef = useRef(onExpire);
   onExpireRef.current = onExpire;
-  useRenderDiagnostics("ExamCountdown", { active, endsAt, remaining });
 
   useEffect(() => {
     if (!active || !endsAt) {
@@ -1294,7 +1221,6 @@ const ExamCountdown = memo(function ExamCountdown({ endsAt, active, onExpire }) 
     expiredRef.current = false;
     const tick = () => {
       const next = secondsUntil(endsAt);
-      console.info("[CSE Timer] exam update", { remaining: next });
       setRemaining((current) => (current === next ? current : next));
       if (next === 0 && !expiredRef.current) {
         expiredRef.current = true;
@@ -1310,7 +1236,6 @@ const ExamCountdown = memo(function ExamCountdown({ endsAt, active, onExpire }) 
 });
 
 export default function App() {
-  useRenderDiagnostics("App");
   const [progress, setProgress] = useState(loadProgress);
   const [screen, setScreen] = useState("dashboard");
   const [category, setCategory] = useState("All Categories");
@@ -1330,7 +1255,6 @@ export default function App() {
   const [accessMessage, setAccessMessage] = useState("");
   const cloudRefreshInFlightRef = useRef(false);
   const loadedSessionKeyRef = useRef("");
-  const authEventCountRef = useRef(0);
   const profileLoadedRef = useRef(false);
   const allQuestions = useMemo(() => expandQuestionPool(buildQuestionBank(progress, cloudQuestionRows), 60), [progress.imports, cloudQuestionRows]);
   const stats = useMemo(() => analyze(progress, allQuestions), [progress, allQuestions]);
@@ -1340,6 +1264,7 @@ export default function App() {
     const score = Math.min(100, Math.round(stats.accuracy * 0.45 + stats.progress * 0.25 + Math.min(mockCompleted * 6, 18) + Math.min(masteryPassed * 4, 12)));
     return { score, mockCompleted, masteryPassed, status: score >= 85 ? "READY FOR PROFESSIONAL CIVIL SERVICE EXAM" : score >= 70 ? "NEAR READY - strengthen weak topics" : "BUILDING FOUNDATION" };
   }, [progress.sessions, stats]);
+  const rankInfo = useMemo(() => getRankInfo(stats, progress, readiness), [stats, progress, readiness]);
   const availableTopics = useMemo(() => {
     const topicSet = new Set(allQuestions.filter((q) => category === "All Categories" || q.category === category).map((q) => q.subCategory));
     return ["All Topics", ...Array.from(topicSet).sort()];
@@ -1351,13 +1276,8 @@ export default function App() {
   const hasAccess = profile?.status === "Approved" || trialActiveNow;
   const isAdmin = profile?.role === "Admin";
 
-  function authLog(label, payload = {}) {
-    console.info(`[CSE Auth] ${label}`, payload);
-  }
-
-  function authError(label, error, extra = {}) {
+  function setSupabaseError(label, error) {
     if (!error) return;
-    console.error(`[CSE Auth] ${label}`, { message: error.message, code: error.code, details: error.details, hint: error.hint, ...extra });
     setAccessMessage(`${label}: ${error.message}`);
   }
 
@@ -1370,49 +1290,25 @@ export default function App() {
     }
   }, []);
 
-  useEffect(() => {
-    markDiagnostic("state", "screen", { screen });
-  }, [screen]);
-
-  useEffect(() => {
-    markDiagnostic("state", "cloudLoading", { cloudLoading });
-  }, [cloudLoading]);
-
-  useEffect(() => {
-    markDiagnostic("state", "profile", { status: profile?.status || null, role: profile?.role || null, userId: profile?.user_id || null });
-  }, [profile?.status, profile?.role, profile?.user_id]);
-
-  useEffect(() => {
-    markDiagnostic("state", "authSession", { userId: authSession?.user?.id || null });
-  }, [authSession?.user?.id]);
-
-  useEffect(() => {
-    markDiagnostic("state", "exam", { mode, index: exam?.index ?? null, submitted: exam?.submitted ?? null, endsAt: exam?.endsAt || null });
-  }, [mode, exam?.index, exam?.submitted, exam?.endsAt]);
-
   async function ensureCloudProfile(session) {
     if (!supabase || !session?.user) return;
     const user = session.user;
     const now = new Date().toISOString();
     const fullName = user.user_metadata?.full_name || user.user_metadata?.name || user.email?.split("@")[0] || "Student";
-    authLog("session user", { id: user.id, email: user.email, metadata: user.user_metadata });
 
     const existingUserResult = await supabase.from("users").select("id,email").eq("id", user.id).maybeSingle();
-    authError("users lookup failed", existingUserResult.error);
+    setSupabaseError("users lookup failed", existingUserResult.error);
     if (!existingUserResult.data) {
       const insertUserResult = await supabase.from("users").insert({ id: user.id, email: user.email, full_name: fullName, created_at: user.created_at });
-      authLog("users insert attempted", { id: user.id, email: user.email });
-      authError("users insert failed", insertUserResult.error);
+      setSupabaseError("users insert failed", insertUserResult.error);
     }
 
     const profileLookup = await supabase.from("user_profiles").select("user_id,status,role,trial_expires_at").eq("user_id", user.id).maybeSingle();
-    authLog("profile lookup", { data: profileLookup.data, error: profileLookup.error });
-    authError("profile lookup failed", profileLookup.error);
+    setSupabaseError("profile lookup failed", profileLookup.error);
     const existingProfile = profileLookup.data;
     if (existingProfile) {
       const updateProfileResult = await supabase.from("user_profiles").update({ full_name: fullName, gmail_address: user.email, last_login: now, updated_at: now }).eq("user_id", user.id);
-      authLog("profile update attempted", { user_id: user.id });
-      authError("profile update failed", updateProfileResult.error);
+      setSupabaseError("profile update failed", updateProfileResult.error);
     } else {
       const insertProfileResult = await supabase.from("user_profiles").insert({
         user_id: user.id,
@@ -1424,19 +1320,16 @@ export default function App() {
         trial_started_at: now,
         trial_expires_at: new Date(Date.now() + TRIAL_MINUTES * 60 * 1000).toISOString()
       });
-      authLog("trial/profile creation attempted", { user_id: user.id, status: "Trial Active" });
-      authError("trial/profile creation failed", insertProfileResult.error);
+      setSupabaseError("trial/profile creation failed", insertProfileResult.error);
     }
     const progressLookup = await supabase.from("user_progress").select("user_id").eq("user_id", user.id).maybeSingle();
-    authLog("progress lookup", { data: progressLookup.data, error: progressLookup.error });
-    authError("progress lookup failed", progressLookup.error);
+    setSupabaseError("progress lookup failed", progressLookup.error);
     if (!progressLookup.data) {
       const insertProgressResult = await supabase.from("user_progress").insert({ user_id: user.id, app_state: initialProgress });
-      authLog("progress initialization attempted", { user_id: user.id });
-      authError("progress initialization failed", insertProgressResult.error);
+      setSupabaseError("progress initialization failed", insertProgressResult.error);
     }
     const analyticsResult = await supabase.from("analytics").upsert({ user_id: user.id }, { onConflict: "user_id" });
-    authError("analytics initialization failed", analyticsResult.error);
+    setSupabaseError("analytics initialization failed", analyticsResult.error);
   }
 
   async function refreshCloudState(session = authSession, options = {}) {
@@ -1447,16 +1340,12 @@ export default function App() {
     const showLoading = options.showLoading ?? !profileLoadedRef.current;
     const sessionKey = `${session.user.id}:${session.access_token?.slice(-18) || "no-token"}`;
     if (cloudRefreshInFlightRef.current) {
-      authLog("profile refresh skipped: already in flight", { userId: session.user.id });
       return;
     }
     if (loadedSessionKeyRef.current === sessionKey) {
-      authLog("profile refresh skipped: session already loaded", { userId: session.user.id });
       return;
     }
     cloudRefreshInFlightRef.current = true;
-    markDiagnostic("profileFetch", "refreshCloudState", { userId: session.user.id, showLoading, reason: options.reason || "unknown" });
-    authLog("profile refresh started", { userId: session.user.id, sessionKey, showLoading, reason: options.reason });
     if (showLoading) setCloudLoading(true);
     try {
       await ensureCloudProfile(session);
@@ -1468,21 +1357,11 @@ export default function App() {
         supabase.from("device_sessions").select("*").eq("user_id", userId).order("last_login", { ascending: false }),
         supabase.from("question_bank").select("*").limit(5000)
       ]);
-      authLog("post-login query results", {
-        userId,
-        profile: profileResult.data,
-        profileError: profileResult.error,
-        progressError: progressResult.error,
-        historyError: historyResult.error,
-        deviceError: deviceResult.error,
-        questionBankError: questionBankResult.error,
-        questionBankCount: questionBankResult.data?.length || 0
-      });
-      authError("profile fetch failed", profileResult.error);
-      authError("progress fetch failed", progressResult.error);
-      authError("login history fetch failed", historyResult.error);
-      authError("device sessions fetch failed", deviceResult.error);
-      authError("question bank fetch failed", questionBankResult.error);
+      setSupabaseError("profile fetch failed", profileResult.error);
+      setSupabaseError("progress fetch failed", progressResult.error);
+      setSupabaseError("login history fetch failed", historyResult.error);
+      setSupabaseError("device sessions fetch failed", deviceResult.error);
+      setSupabaseError("question bank fetch failed", questionBankResult.error);
       const profileRow = profileResult.data;
       const progressRow = progressResult.data;
       const historyRows = historyResult.data;
@@ -1512,8 +1391,7 @@ export default function App() {
     const device_info = deviceLabel();
     const activeDeviceResult = await supabase.from("device_sessions").select("*").eq("user_id", userId).eq("active", true).order("last_login", { ascending: false });
     const activeDevices = activeDeviceResult.data;
-    authLog("active device lookup", { userId, activeDevices });
-    authError("active device lookup failed", activeDeviceResult.error);
+    setSupabaseError("active device lookup failed", activeDeviceResult.error);
     const known = (activeDevices || []).some((d) => d.device_id === device_id);
     if (!known && (activeDevices || []).length >= MAX_ACTIVE_DEVICES) {
       setAccessMessage("Maximum active devices reached. Please contact the administrator to reset device access.");
@@ -1522,16 +1400,15 @@ export default function App() {
       return;
     }
     const deviceResult = await supabase.from("device_sessions").upsert({ user_id: userId, device_id, device_info, last_login: now, active: true }, { onConflict: "user_id,device_id" });
-    authError("device session upsert failed", deviceResult.error);
+    setSupabaseError("device session upsert failed", deviceResult.error);
     const historyResult = await supabase.from("login_history").insert({ user_id: userId, device_id, device_info, action: "LOGIN" });
-    authError("login history insert failed", historyResult.error);
+    setSupabaseError("login history insert failed", historyResult.error);
   }
 
   async function loadAdminUsers() {
     if (!supabase) return;
     const { data, error } = await supabase.from("user_profiles").select("*, device_sessions(*), login_history(*)").order("registration_date", { ascending: false });
-    authLog("admin users lookup", { count: data?.length || 0, error });
-    authError("admin users lookup failed", error);
+    setSupabaseError("admin users lookup failed", error);
     setCloudUsers(data || []);
   }
 
@@ -1541,11 +1418,8 @@ export default function App() {
       setAccessMessage("Supabase is not configured. Add NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY to enable cloud access.");
       return;
     }
-    markDiagnostic("sessionFetch", "initial getSession");
     supabase.auth.getSession().then(({ data, error }) => {
-      authLog("initial session check", { hasSession: Boolean(data.session), userId: data.session?.user?.id, error });
       if (error) {
-        console.error("[CSE Auth] initial session check failed", error);
         setAccessMessage(error.message);
       }
       setAuthSession(data.session);
@@ -1553,14 +1427,10 @@ export default function App() {
       else setCloudLoading(false);
     });
     const { data: listener } = supabase.auth.onAuthStateChange((event, session) => {
-      authEventCountRef.current += 1;
-      markDiagnostic("auth", event, { hasSession: Boolean(session), userId: session?.user?.id });
-      if (typeof window !== "undefined" && window.__CSE_RENDER_DIAGNOSTICS__) window.__CSE_RENDER_DIAGNOSTICS__.auth = authEventCountRef.current;
-      authLog("auth state change", { event, count: authEventCountRef.current, hasSession: Boolean(session), userId: session?.user?.id });
       if (event === "SIGNED_OUT") setAccessMessage("");
       setAuthSession(session);
       if (session && ["INITIAL_SESSION", "SIGNED_IN", "USER_UPDATED"].includes(event)) refreshCloudState(session, { showLoading: !profileLoadedRef.current, reason: event });
-      else if (session) authLog("profile refresh skipped for auth event", { event, userId: session.user?.id });
+      else if (session) return;
       else {
         profileLoadedRef.current = false;
         setProfile(null);
@@ -1572,7 +1442,6 @@ export default function App() {
 
   const handleTrialExpired = useCallback(() => {
     if (!profile?.user_id || profile.status !== "Trial Active") return;
-    console.info("[CSE Timer] trial expired", { userId: profile.user_id });
     setAccessMessage("Your trial access has ended. Please contact the administrator for full access.");
     setProfile((current) => current?.user_id === profile.user_id ? { ...current, status: "Expired" } : current);
     if (supabase) {
@@ -1610,7 +1479,6 @@ export default function App() {
     }
     setAccessMessage("");
     const redirectTo = typeof window !== "undefined" ? `${window.location.origin}/auth/callback` : undefined;
-    authLog("starting Google OAuth", { redirectTo });
     const { error } = await supabase.auth.signInWithOAuth({
       provider: "google",
       options: {
@@ -1725,7 +1593,6 @@ export default function App() {
   }
 
   const handleExamExpired = useCallback(() => {
-    console.info("[CSE Timer] exam expired", { mode, submitted: exam?.submitted });
     if (!exam?.submitted) submitExam();
   }, [mode, category, subCategory, exam?.submitted]);
 
@@ -1772,7 +1639,6 @@ export default function App() {
   }
 
   const Header = () => {
-    useRenderDiagnostics("Header", { screen, status: profile?.status });
     return (
     <div className="sticky top-0 z-30 border-b border-white/10 bg-slate-950/75 backdrop-blur-xl">
       <div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-4">
@@ -1785,7 +1651,7 @@ export default function App() {
           <button onClick={() => setScreen("admin")} className="rounded-full border border-white/10 bg-white/10 px-3 py-1 text-xs font-semibold text-white/80">Admin Import</button>
           <button onClick={() => setScreen("account")} className="rounded-full border border-white/10 bg-white/10 px-3 py-1 text-xs font-semibold text-white/80">{profile ? profile.full_name : "Gmail Login"}</button>
           {profile?.status === "Trial Active" && <TrialCountdown expiresAt={profile.trial_expires_at} userId={profile.user_id} onExpired={handleTrialExpired} />}
-          <Pill><Flame className="mr-1 h-3.5 w-3.5 text-orange-300" />{progress.streak} day streak</Pill><Pill><Trophy className="mr-1 h-3.5 w-3.5 text-amber-300" />{getRank(progress.xp)}</Pill>
+          <Pill><Flame className="mr-1 h-3.5 w-3.5 text-orange-300" />{progress.streak} day streak</Pill><Pill><Trophy className="mr-1 h-3.5 w-3.5 text-amber-300" />{rankInfo.current}</Pill>
         </div>
       </div>
     </div>
@@ -1793,7 +1659,6 @@ export default function App() {
   };
 
   const Dashboard = () => {
-    useRenderDiagnostics("Dashboard", { screen, category, subCategory });
     return (
     <div className="mx-auto max-w-7xl px-4 py-8">
       <div className="grid gap-4 lg:grid-cols-[1.35fr_.65fr]">
@@ -1834,7 +1699,7 @@ export default function App() {
             <p>{progress.sessions.length >= 2 ? `Your latest exam trend is ${progress.sessions.at(-1).accuracy - progress.sessions.at(-2).accuracy >= 0 ? "improving" : "dipping"} by ${Math.abs(progress.sessions.at(-1).accuracy - progress.sessions.at(-2).accuracy)}%.` : "Complete a timed exam to unlock improvement trend insights."}</p>
             <p>Exam Readiness Score: {readiness.score}%. Status: {readiness.status}.</p>
           </div>
-          <div className="mt-5 rounded-2xl bg-gradient-to-br from-emerald-400/20 to-sky-400/20 p-4"><div className="text-sm text-white/60">Current rank</div><div className="text-2xl font-black">{getRank(progress.xp)}</div></div>
+          <div className="mt-5 rounded-2xl bg-gradient-to-br from-emerald-400/20 to-sky-400/20 p-4"><div className="text-sm text-white/60">Current rank</div><div className="text-2xl font-black">{rankInfo.current}</div><div className="mt-3 flex justify-between text-xs text-white/60"><span>Progress to {rankInfo.next}</span><span>{rankInfo.progressToNext}%</span></div><div className="mt-2 h-2 rounded-full bg-white/10"><div className="h-full rounded-full bg-gradient-to-r from-emerald-300 to-cyan-300" style={{ width: `${rankInfo.progressToNext}%` }} /></div><p className="mt-2 text-[11px] text-white/45">Score {rankInfo.score}/100 from accuracy, answered volume, mastery tests, mock exams, and readiness.</p></div>
         </section>
       </div>
       <section className="mt-6 rounded-[1.5rem] border border-white/10 bg-white/[.07] p-5 backdrop-blur-xl">
@@ -1873,10 +1738,9 @@ export default function App() {
   };
 
   const Analytics = () => {
-    useRenderDiagnostics("Reviewer Analytics", { totalAnswered: stats.total });
     const subRows = CATEGORIES.flatMap((cat) => cat.subs.map((sub) => {
       const s = stats.subStats.find((row) => row.name === sub);
-      return { name: sub, category: cat.short, total: s?.total || 0, accuracy: s?.accuracy || 0, correct: s?.correct || 0, wrong: s?.wrong || 0 };
+      return { name: sub, category: cat.short, available: allQuestions.filter((q) => q.category === cat.name && q.subCategory === sub).length, total: s?.total || 0, accuracy: s?.accuracy || 0, correct: s?.correct || 0, wrong: s?.wrong || 0 };
     }));
     return <section className="mt-8 grid gap-4 lg:grid-cols-3">
       <div className="rounded-[1.5rem] border border-white/10 bg-white/[.07] p-5 backdrop-blur-xl lg:col-span-2">
@@ -1897,9 +1761,9 @@ export default function App() {
         <div className="grid max-h-[520px] gap-3 overflow-auto pr-1 sm:grid-cols-2 lg:grid-cols-3">
           {subRows.map((s) => (
             <button key={`${s.category}-${s.name}`} onClick={() => { const cat = CATEGORIES.find((c) => c.short === s.category)?.name || "All Categories"; setCategory(cat); setSubCategory(s.name); startExam(cat, "Practice", s.name); }} className="rounded-2xl bg-slate-900/45 p-4 text-left transition hover:bg-white/10">
-              <div className="mb-2 flex items-start justify-between gap-3"><div><b className="text-sm">{s.name}</b><div className="text-[11px] text-white/45">{s.category}</div></div><span className={`text-sm font-black ${s.accuracy >= 80 ? "text-emerald-200" : s.accuracy >= 60 ? "text-yellow-200" : "text-red-200"}`}>{s.total ? `${s.accuracy}%` : "0%"}</span></div>
+              <div className="mb-2 flex items-start justify-between gap-3"><div><b className="text-sm">{s.name}</b><div className="text-[11px] text-white/45">{s.category}</div></div><span className={`text-sm font-black ${s.accuracy >= 80 ? "text-emerald-200" : s.accuracy >= 60 ? "text-yellow-200" : "text-red-200"}`}>{masteryLevel(s.accuracy, s.total)}</span></div>
               <div className="h-2 rounded-full bg-white/10"><div className={`h-full rounded-full ${s.accuracy >= 80 ? "bg-emerald-300" : s.accuracy >= 60 ? "bg-yellow-300" : "bg-red-300"}`} style={{ width: `${s.accuracy}%` }} /></div>
-              <div className="mt-2 text-xs text-white/45">{s.total} answered • {s.correct} correct • {s.wrong} wrong</div>
+              <div className="mt-2 grid grid-cols-2 gap-1 text-xs text-white/45"><span>Available: {s.available}</span><span>Answered: {s.total}</span><span>Correct: {s.correct}</span><span>Incorrect: {s.wrong}</span><span>Accuracy: {s.accuracy}%</span><span>{masteryLevel(s.accuracy, s.total)}</span></div>
             </button>
           ))}
         </div>
@@ -1908,7 +1772,6 @@ export default function App() {
   };
 
   const Exam = () => {
-    useRenderDiagnostics(mode?.includes("Mock") ? "Mock Exams" : "Practice Exams", { mode, index: exam?.index, submitted: exam?.submitted });
     if (!exam) return null;
     const q = exam.questions[exam.index];
     const ans = exam.answers[q.id];
@@ -1962,7 +1825,6 @@ export default function App() {
   };
 
   const Results = () => {
-    useRenderDiagnostics("Results", { mode });
     if (!exam) return null;
     const answers = Object.values(exam.answers);
     const correct = answers.filter((a) => a.status === "correct").length;
@@ -1976,7 +1838,6 @@ export default function App() {
   };
 
   const Review = () => {
-    useRenderDiagnostics("Reviewer", { filter: reviewFilter });
     const weakestTopics = stats.subStats.filter((s) => s.total).sort((a, b) => a.accuracy - b.accuracy || b.wrong - a.wrong).slice(0, 5);
     const improvedTopics = stats.subStats.map((s) => ({ ...s, trend: topicTrend(progress, s.name) })).filter((s) => s.trend > 0).sort((a, b) => b.trend - a.trend).slice(0, 5);
     const recommendedTopic = weakestTopics[0]?.name || CATEGORIES[0].subs[0];
@@ -1996,7 +1857,6 @@ export default function App() {
   };
 
   const Learn = () => {
-    useRenderDiagnostics("Reviewer Lessons", { topic: activeLesson.topic });
     return <div className="mx-auto grid max-w-7xl gap-5 px-4 py-8 lg:grid-cols-[.35fr_.65fr]">
       <aside className="rounded-[1.5rem] border border-white/10 bg-white/[.07] p-4 backdrop-blur-xl">
         <h2 className="mb-3 text-xl font-black">Learning Modules</h2>
@@ -2020,30 +1880,30 @@ export default function App() {
         <div className="grid gap-4 md:grid-cols-2">
           {[["Examples", activeLesson.examples], ["Common Mistakes", activeLesson.commonMistakes], ["Step-by-Step Guide", activeLesson.stepGuide], ["Test-Taking Techniques", activeLesson.techniques], ["Civil Service Exam Tips", activeLesson.tips], ["Do's and Don'ts", [...activeLesson.dos.map((x) => `Do: ${x}`), ...activeLesson.donts.map((x) => `Don't: ${x}`)]]].map(([title, rows]) => <div key={title} className="rounded-2xl bg-slate-900/45 p-4"><h3 className="mb-2 font-black">{title}</h3>{rows.map((row) => <p key={row} className="mb-2 text-sm text-white/65">{row}</p>)}</div>)}
         </div>
-        <div className="mt-5 flex flex-wrap gap-3"><button onClick={() => startExam(activeLesson.category, "Mini Quiz", activeLesson.topic)} className="rounded-2xl bg-white px-5 py-3 font-bold text-slate-950">5-Question Mini Quiz</button><button onClick={() => startExam(activeLesson.category, "Mastery Test", activeLesson.topic)} className="rounded-2xl border border-white/10 bg-white/10 px-5 py-3 font-bold">Mastery Test</button></div>
+        <div className="mt-5 flex flex-wrap gap-3"><button onClick={() => startExam(activeLesson.category, "Mini Quiz", activeLesson.topic)} className="rounded-2xl bg-white px-5 py-3 font-bold text-slate-950">20-Question Mini Quiz</button><button onClick={() => startExam(activeLesson.category, "Mastery Test", activeLesson.topic)} className="rounded-2xl border border-white/10 bg-white/10 px-5 py-3 font-bold">Mastery Test</button></div>
       </section>
     </div>;
   };
 
   const Admin = () => {
-    useRenderDiagnostics("Admin", { isAdmin });
     const bankStats = CATEGORIES.map((cat) => ({ name: cat.name, count: allQuestions.filter((q) => q.category === cat.name).length }));
+    const topicStats = CATEGORIES.flatMap((cat) => cat.subs.map((sub) => ({ category: cat.short, name: sub, count: allQuestions.filter((q) => q.category === cat.name && q.subCategory === sub).length })));
     if (!isAdmin) return <div className="mx-auto max-w-4xl px-4 py-10"><section className="rounded-[2rem] border border-white/10 bg-white/[.08] p-7 text-center backdrop-blur-xl"><h2 className="text-3xl font-black">Admin Access Required</h2><p className="mt-3 text-white/60">Only accounts with the Admin role can manage users, licenses, sessions, and approvals.</p></section></div>;
     return <div className="mx-auto max-w-7xl px-4 py-8">
       <div className="rounded-[2rem] border border-white/10 bg-white/[.08] p-6 backdrop-blur-xl">
         <div className="flex flex-wrap items-start justify-between gap-4"><div><p className="text-emerald-200">Reviewer Import System</p><h2 className="text-3xl font-black">Admin Import Module</h2><p className="mt-2 max-w-3xl text-sm text-white/60">Upload PDF, DOCX, or TXT reviewers. The app extracts text where available, detects category/topics, builds lessons/concepts, generates practice variations, and syncs imported reviewer metadata through Supabase progress storage.</p></div><label className="inline-flex min-h-12 cursor-pointer items-center gap-2 rounded-2xl bg-white px-5 font-black text-slate-950"><Upload className="h-4 w-4" />{importBusy ? "Analyzing..." : "Upload Reviewers"}<input type="file" multiple accept=".pdf,.docx,.txt" className="hidden" onChange={(e) => importReviewers(e.target.files)} /></label></div>
         <div className="mt-6 grid gap-3 md:grid-cols-5"><div className="rounded-2xl bg-slate-900/55 p-4"><div className="text-2xl font-black">{allQuestions.length}</div><div className="text-xs text-white/50">Total Questions</div></div>{bankStats.map((s) => <div key={s.name} className="rounded-2xl bg-slate-900/55 p-4"><div className="text-2xl font-black">{s.count}</div><div className="text-xs text-white/50">{s.name}</div></div>)}</div>
+        <div className="mt-5 rounded-2xl bg-slate-900/45 p-4"><h3 className="mb-3 font-black">Question Counts by Subcategory</h3><div className="grid max-h-72 gap-2 overflow-auto pr-1 sm:grid-cols-2 lg:grid-cols-4">{topicStats.map((s) => <div key={`${s.category}-${s.name}`} className="rounded-xl bg-white/5 p-3"><div className="text-sm font-bold">{s.name}</div><div className="text-xs text-white/45">{s.category}</div><div className="mt-1 text-lg font-black">{s.count}</div></div>)}</div></div>
       </div>
       <div className="mt-5 grid gap-4 lg:grid-cols-2">
         <section className="rounded-[1.5rem] border border-white/10 bg-white/[.07] p-5 backdrop-blur-xl"><h3 className="mb-3 text-lg font-black">Built-In Reviewer Catalog</h3><div className="space-y-2">{BUILT_IN_REVIEWERS.map((name) => <div key={name} className="rounded-2xl bg-slate-900/45 p-3 text-sm text-white/70">{name}</div>)}</div></section>
-        <section className="rounded-[1.5rem] border border-white/10 bg-white/[.07] p-5 backdrop-blur-xl"><h3 className="mb-3 text-lg font-black">Imported Files</h3><div className="space-y-3">{!(progress.imports || []).length && <p className="text-sm text-white/55">No uploaded files yet. Your local reviewer ZIPs are cataloged above; upload PDFs/DOCX/TXT here to expand the active bank.</p>}{(progress.imports || []).map((item) => <div key={item.id} className="rounded-2xl bg-slate-900/45 p-4"><div className="flex justify-between gap-3"><b>{item.name}</b><Pill>{item.category}</Pill></div><p className="mt-2 text-xs text-white/50">{item.topics.length ? item.topics.join(", ") : "General concepts detected"} • {generatedFromImport(item, 12).length} generated questions</p><div className="mt-3 text-xs text-white/55">{item.concepts.slice(0, 3).map((c) => <p key={c}>• {c}</p>)}</div></div>)}</div></section>
+        <section className="rounded-[1.5rem] border border-white/10 bg-white/[.07] p-5 backdrop-blur-xl"><h3 className="mb-3 text-lg font-black">Imported Files</h3><div className="space-y-3">{!(progress.imports || []).length && <p className="text-sm text-white/55">No uploaded files yet. Your local reviewer ZIPs are cataloged above; upload PDFs/DOCX/TXT here to expand the active bank.</p>}{(progress.imports || []).map((item) => <div key={item.id} className="rounded-2xl bg-slate-900/45 p-4"><div className="flex justify-between gap-3"><b>{item.name}</b><Pill>{item.category}</Pill></div><p className="mt-2 text-xs text-white/50">{item.topics.length ? item.topics.join(", ") : "General concepts detected"} • {generatedFromImport(item, Math.max(80, ((item.topics || []).length || 4) * 50)).length} generated questions</p><div className="mt-3 text-xs text-white/55">{item.concepts.slice(0, 3).map((c) => <p key={c}>• {c}</p>)}</div></div>)}</div></section>
         <section className="rounded-[1.5rem] border border-white/10 bg-white/[.07] p-5 backdrop-blur-xl lg:col-span-2"><h3 className="mb-3 text-lg font-black">Admin: Users, Licenses, Active Sessions</h3><div className="grid gap-3 md:grid-cols-4"><div className="rounded-2xl bg-slate-900/45 p-4"><div className="text-2xl font-black">{cloudUsers.length}</div><div className="text-xs text-white/50">Registered Users</div></div><div className="rounded-2xl bg-slate-900/45 p-4"><div className="text-2xl font-black">{cloudUsers.filter((u) => u.status === "Approved").length}</div><div className="text-xs text-white/50">Approved Licenses</div></div><div className="rounded-2xl bg-slate-900/45 p-4"><div className="text-2xl font-black">{cloudUsers.reduce((sum, u) => sum + (u.device_sessions?.length || 0), 0)}</div><div className="text-xs text-white/50">Tracked Devices</div></div><div className="rounded-2xl bg-slate-900/45 p-4"><div className="text-2xl font-black">Future</div><div className="text-xs text-white/50">Revenue Tracking</div></div></div><div className="mt-4 space-y-3">{!cloudUsers.length && <p className="text-sm text-white/55">No Gmail accounts registered yet.</p>}{cloudUsers.map((u) => <div key={u.user_id} className="rounded-2xl bg-slate-900/45 p-4"><div className="flex flex-wrap items-center justify-between gap-3"><div><b>{u.full_name}</b><p className="text-xs text-white/50">{u.gmail_address} • Registered {new Date(u.registration_date).toLocaleDateString()} • Last login {u.last_login ? new Date(u.last_login).toLocaleString() : "Never"}</p></div><div className="flex flex-wrap gap-2"><Pill>{u.status}</Pill><button onClick={() => updateUserStatus(u.user_id, "Approved")} className="rounded-xl bg-emerald-400/20 px-3 py-2 text-xs font-bold text-emerald-100">Approve</button><button onClick={() => extendTrial(u.user_id)} className="rounded-xl bg-cyan-400/20 px-3 py-2 text-xs font-bold text-cyan-100">Extend Trial</button><button onClick={() => updateUserStatus(u.user_id, "Suspended")} className="rounded-xl bg-red-400/20 px-3 py-2 text-xs font-bold text-red-100">Suspend</button><button onClick={() => updateUserStatus(u.user_id, "Expired")} className="rounded-xl bg-white/10 px-3 py-2 text-xs font-bold">Revoke</button></div></div><div className="mt-3 grid gap-2 md:grid-cols-2">{(u.device_sessions || []).map((d) => <div key={d.id} className="rounded-xl bg-white/5 p-3 text-xs text-white/60">{d.device_info}<br />Last: {new Date(d.last_login).toLocaleString()}<br />Active: {d.active ? "Yes" : "No"}</div>)}</div><div className="mt-3 max-h-28 overflow-auto text-xs text-white/50">{(u.login_history || []).slice(0, 5).map((h) => <p key={h.id}>{new Date(h.created_at).toLocaleString()} • {h.device_info} • {h.action}</p>)}</div></div>)}</div></section>
       </div>
     </div>;
   };
 
   const Account = () => {
-    useRenderDiagnostics("Login page", { hasProfile: Boolean(profile), status: profile?.status });
     return <div className="mx-auto max-w-5xl px-4 py-8">
       <section className="rounded-[2rem] border border-white/10 bg-white/[.08] p-6 backdrop-blur-xl">
         <p className="text-emerald-200">Supabase Authentication</p>
@@ -2064,7 +1924,6 @@ export default function App() {
   };
 
   const AccessLocked = () => {
-    useRenderDiagnostics(profile?.status === "Expired" ? "Trial Expired page" : "Access Locked page", { status: profile?.status });
     return <div className="mx-auto max-w-4xl px-4 py-10">
       <section className="rounded-[2rem] border border-white/10 bg-white/[.08] p-7 text-center backdrop-blur-xl">
         <ShieldCheck className="mx-auto mb-4 h-12 w-12 text-emerald-200" />
@@ -2112,7 +1971,8 @@ export default function App() {
       {!cloudLoading && hasAccess && screen === "learn" && <Learn />}
       {!cloudLoading && hasAccess && screen === "admin" && <Admin />}
       {screen === "account" && <Account />}
-      <DebugOverlay />
     </div>
   );
 }
+
+

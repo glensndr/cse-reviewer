@@ -17,13 +17,6 @@ export default function AuthCallbackPage() {
       const oauthError = url.searchParams.get("error");
       const oauthErrorDescription = url.searchParams.get("error_description");
       const code = url.searchParams.get("code");
-      console.info("[CSE Auth Callback] callback received", {
-        origin: window.location.origin,
-        pathname: window.location.pathname,
-        hasCode: Boolean(code),
-        hasOAuthError: Boolean(oauthError)
-      });
-
       if (oauthError) {
         setMessage(oauthErrorDescription || oauthError);
         return;
@@ -33,29 +26,18 @@ export default function AuthCallbackPage() {
         if (code) {
           const { error } = await supabase.auth.exchangeCodeForSession(code);
           if (error) {
-            console.error("[CSE Auth Callback] exchangeCodeForSession failed", {
-              message: error.message,
-              code: error.code,
-              status: error.status
-            });
             const pkceMissing = error.message?.toLowerCase().includes("code verifier");
             setMessage(pkceMissing
               ? "Unable to complete Gmail login because the PKCE verifier was not found in this browser session. Please return to the login page and start Gmail login again from the same browser tab."
               : `Unable to complete Gmail login: ${error.message}`);
             return;
           }
-          console.info("[CSE Auth Callback] code exchange succeeded");
         } else {
           const { data, error } = await supabase.auth.getSession();
           if (error || !data.session) {
-            console.error("[CSE Auth Callback] session restore failed", {
-              message: error?.message,
-              hasSession: Boolean(data?.session)
-            });
             setMessage(error?.message || "No OAuth code or active session was found. Please start Gmail login again.");
             return;
           }
-          console.info("[CSE Auth Callback] existing session restored", { userId: data.session.user?.id });
         }
 
         window.history.replaceState({}, document.title, "/auth/callback");
