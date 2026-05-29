@@ -10,8 +10,9 @@ export const supabase = supabaseConfigured
       auth: {
         persistSession: true,
         autoRefreshToken: true,
-        detectSessionInUrl: true
+        detectSessionInUrl: false,
+        flowType: "pkce",
+        storageKey: "cse-reviewer-supabase-auth"
       }
     })
   : null;
-
