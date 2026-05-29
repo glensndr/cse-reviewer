@@ -1104,6 +1104,15 @@ export default function App() {
   const hasAccess = profile?.status === "Approved" || (profile?.status === "Trial Active" && trialRemaining > 0);
   const isAdmin = profile?.role === "Admin";
 
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const url = new URL(window.location.href);
+    const hasOAuthParams = url.searchParams.has("code") || url.searchParams.has("error") || url.searchParams.has("error_description");
+    if (url.pathname === "/" && hasOAuthParams) {
+      window.location.replace(`/auth/callback${url.search}`);
+    }
+  }, []);
+
   async function ensureCloudProfile(session) {
     if (!supabase || !session?.user) return;
     const user = session.user;
