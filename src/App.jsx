@@ -1248,6 +1248,7 @@ export default function App() {
   const [authSession, setAuthSession] = useState(null);
   const [profile, setProfile] = useState(null);
   const [cloudUsers, setCloudUsers] = useState([]);
+  const [adminMessage, setAdminMessage] = useState("");
   const [loginHistory, setLoginHistory] = useState([]);
   const [deviceSessions, setDeviceSessions] = useState([]);
   const [cloudQuestionRows, setCloudQuestionRows] = useState([]);
@@ -1278,7 +1279,7 @@ export default function App() {
 
   function setSupabaseError(label, error) {
     if (!error) return;
-    setAccessMessage(`${label}: ${error.message}`);
+    console.warn(`[CSE Supabase] ${label}`, error);
   }
 
   useEffect(() => {
@@ -1407,9 +1408,41 @@ export default function App() {
 
   async function loadAdminUsers() {
     if (!supabase) return;
-    const { data, error } = await supabase.from("user_profiles").select("*, device_sessions(*), login_history(*)").order("registration_date", { ascending: false });
-    setSupabaseError("admin users lookup failed", error);
-    setCloudUsers(data || []);
+    setAdminMessage("");
+    const profileResult = await supabase.from("user_profiles").select("*").order("registration_date", { ascending: false });
+    if (profileResult.error) {
+      setSupabaseError("admin user profile lookup failed", profileResult.error);
+      setAdminMessage("Admin user list is temporarily unavailable. Your account access is still active.");
+      setCloudUsers([]);
+      return;
+    }
+    const profiles = profileResult.data || [];
+    const userIds = profiles.map((user) => user.user_id).filter(Boolean);
+    if (!userIds.length) {
+      setCloudUsers([]);
+      return;
+    }
+    const [deviceResult, historyResult] = await Promise.all([
+      supabase.from("device_sessions").select("*").in("user_id", userIds).order("last_login", { ascending: false }),
+      supabase.from("login_history").select("*").in("user_id", userIds).order("created_at", { ascending: false }).limit(300)
+    ]);
+    if (deviceResult.error || historyResult.error) {
+      setSupabaseError("admin session detail lookup failed", deviceResult.error || historyResult.error);
+      setAdminMessage("Some admin session details are temporarily unavailable.");
+    }
+    const devicesByUser = (deviceResult.data || []).reduce((map, row) => {
+      (map[row.user_id] ||= []).push(row);
+      return map;
+    }, {});
+    const historyByUser = (historyResult.data || []).reduce((map, row) => {
+      (map[row.user_id] ||= []).push(row);
+      return map;
+    }, {});
+    setCloudUsers(profiles.map((user) => ({
+      ...user,
+      device_sessions: devicesByUser[user.user_id] || [],
+      login_history: historyByUser[user.user_id] || []
+    })));
   }
 
   useEffect(() => {
@@ -1898,7 +1931,7 @@ export default function App() {
       <div className="mt-5 grid gap-4 lg:grid-cols-2">
         <section className="rounded-[1.5rem] border border-white/10 bg-white/[.07] p-5 backdrop-blur-xl"><h3 className="mb-3 text-lg font-black">Built-In Reviewer Catalog</h3><div className="space-y-2">{BUILT_IN_REVIEWERS.map((name) => <div key={name} className="rounded-2xl bg-slate-900/45 p-3 text-sm text-white/70">{name}</div>)}</div></section>
         <section className="rounded-[1.5rem] border border-white/10 bg-white/[.07] p-5 backdrop-blur-xl"><h3 className="mb-3 text-lg font-black">Imported Files</h3><div className="space-y-3">{!(progress.imports || []).length && <p className="text-sm text-white/55">No uploaded files yet. Your local reviewer ZIPs are cataloged above; upload PDFs/DOCX/TXT here to expand the active bank.</p>}{(progress.imports || []).map((item) => <div key={item.id} className="rounded-2xl bg-slate-900/45 p-4"><div className="flex justify-between gap-3"><b>{item.name}</b><Pill>{item.category}</Pill></div><p className="mt-2 text-xs text-white/50">{item.topics.length ? item.topics.join(", ") : "General concepts detected"} • {generatedFromImport(item, Math.max(80, ((item.topics || []).length || 4) * 50)).length} generated questions</p><div className="mt-3 text-xs text-white/55">{item.concepts.slice(0, 3).map((c) => <p key={c}>• {c}</p>)}</div></div>)}</div></section>
-        <section className="rounded-[1.5rem] border border-white/10 bg-white/[.07] p-5 backdrop-blur-xl lg:col-span-2"><h3 className="mb-3 text-lg font-black">Admin: Users, Licenses, Active Sessions</h3><div className="grid gap-3 md:grid-cols-4"><div className="rounded-2xl bg-slate-900/45 p-4"><div className="text-2xl font-black">{cloudUsers.length}</div><div className="text-xs text-white/50">Registered Users</div></div><div className="rounded-2xl bg-slate-900/45 p-4"><div className="text-2xl font-black">{cloudUsers.filter((u) => u.status === "Approved").length}</div><div className="text-xs text-white/50">Approved Licenses</div></div><div className="rounded-2xl bg-slate-900/45 p-4"><div className="text-2xl font-black">{cloudUsers.reduce((sum, u) => sum + (u.device_sessions?.length || 0), 0)}</div><div className="text-xs text-white/50">Tracked Devices</div></div><div className="rounded-2xl bg-slate-900/45 p-4"><div className="text-2xl font-black">Future</div><div className="text-xs text-white/50">Revenue Tracking</div></div></div><div className="mt-4 space-y-3">{!cloudUsers.length && <p className="text-sm text-white/55">No Gmail accounts registered yet.</p>}{cloudUsers.map((u) => <div key={u.user_id} className="rounded-2xl bg-slate-900/45 p-4"><div className="flex flex-wrap items-center justify-between gap-3"><div><b>{u.full_name}</b><p className="text-xs text-white/50">{u.gmail_address} • Registered {new Date(u.registration_date).toLocaleDateString()} • Last login {u.last_login ? new Date(u.last_login).toLocaleString() : "Never"}</p></div><div className="flex flex-wrap gap-2"><Pill>{u.status}</Pill><button onClick={() => updateUserStatus(u.user_id, "Approved")} className="rounded-xl bg-emerald-400/20 px-3 py-2 text-xs font-bold text-emerald-100">Approve</button><button onClick={() => extendTrial(u.user_id)} className="rounded-xl bg-cyan-400/20 px-3 py-2 text-xs font-bold text-cyan-100">Extend Trial</button><button onClick={() => updateUserStatus(u.user_id, "Suspended")} className="rounded-xl bg-red-400/20 px-3 py-2 text-xs font-bold text-red-100">Suspend</button><button onClick={() => updateUserStatus(u.user_id, "Expired")} className="rounded-xl bg-white/10 px-3 py-2 text-xs font-bold">Revoke</button></div></div><div className="mt-3 grid gap-2 md:grid-cols-2">{(u.device_sessions || []).map((d) => <div key={d.id} className="rounded-xl bg-white/5 p-3 text-xs text-white/60">{d.device_info}<br />Last: {new Date(d.last_login).toLocaleString()}<br />Active: {d.active ? "Yes" : "No"}</div>)}</div><div className="mt-3 max-h-28 overflow-auto text-xs text-white/50">{(u.login_history || []).slice(0, 5).map((h) => <p key={h.id}>{new Date(h.created_at).toLocaleString()} • {h.device_info} • {h.action}</p>)}</div></div>)}</div></section>
+        <section className="rounded-[1.5rem] border border-white/10 bg-white/[.07] p-5 backdrop-blur-xl lg:col-span-2"><h3 className="mb-3 text-lg font-black">Admin: Users, Licenses, Active Sessions</h3>{adminMessage && <div className="mb-3 rounded-2xl border border-amber-200/30 bg-amber-300/10 p-3 text-sm text-amber-100">{adminMessage}</div>}<div className="grid gap-3 md:grid-cols-4"><div className="rounded-2xl bg-slate-900/45 p-4"><div className="text-2xl font-black">{cloudUsers.length}</div><div className="text-xs text-white/50">Registered Users</div></div><div className="rounded-2xl bg-slate-900/45 p-4"><div className="text-2xl font-black">{cloudUsers.filter((u) => u.status === "Approved").length}</div><div className="text-xs text-white/50">Approved Licenses</div></div><div className="rounded-2xl bg-slate-900/45 p-4"><div className="text-2xl font-black">{cloudUsers.reduce((sum, u) => sum + (u.device_sessions?.length || 0), 0)}</div><div className="text-xs text-white/50">Tracked Devices</div></div><div className="rounded-2xl bg-slate-900/45 p-4"><div className="text-2xl font-black">Future</div><div className="text-xs text-white/50">Revenue Tracking</div></div></div><div className="mt-4 space-y-3">{!cloudUsers.length && <p className="text-sm text-white/55">No Gmail accounts registered yet.</p>}{cloudUsers.map((u) => <div key={u.user_id} className="rounded-2xl bg-slate-900/45 p-4"><div className="flex flex-wrap items-center justify-between gap-3"><div><b>{u.full_name}</b><p className="text-xs text-white/50">{u.gmail_address} • Registered {new Date(u.registration_date).toLocaleDateString()} • Last login {u.last_login ? new Date(u.last_login).toLocaleString() : "Never"}</p></div><div className="flex flex-wrap gap-2"><Pill>{u.status}</Pill><button onClick={() => updateUserStatus(u.user_id, "Approved")} className="rounded-xl bg-emerald-400/20 px-3 py-2 text-xs font-bold text-emerald-100">Approve</button><button onClick={() => extendTrial(u.user_id)} className="rounded-xl bg-cyan-400/20 px-3 py-2 text-xs font-bold text-cyan-100">Extend Trial</button><button onClick={() => updateUserStatus(u.user_id, "Suspended")} className="rounded-xl bg-red-400/20 px-3 py-2 text-xs font-bold text-red-100">Suspend</button><button onClick={() => updateUserStatus(u.user_id, "Expired")} className="rounded-xl bg-white/10 px-3 py-2 text-xs font-bold">Revoke</button></div></div><div className="mt-3 grid gap-2 md:grid-cols-2">{(u.device_sessions || []).map((d) => <div key={d.id} className="rounded-xl bg-white/5 p-3 text-xs text-white/60">{d.device_info}<br />Last: {new Date(d.last_login).toLocaleString()}<br />Active: {d.active ? "Yes" : "No"}</div>)}</div><div className="mt-3 max-h-28 overflow-auto text-xs text-white/50">{(u.login_history || []).slice(0, 5).map((h) => <p key={h.id}>{new Date(h.created_at).toLocaleString()} • {h.device_info} • {h.action}</p>)}</div></div>)}</div></section>
       </div>
     </div>;
   };
@@ -1974,5 +2007,6 @@ export default function App() {
     </div>
   );
 }
+
 
 
