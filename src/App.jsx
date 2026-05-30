@@ -1016,6 +1016,7 @@ const initialProgress = {
   account: null,
   sessions: [],
   onboardingComplete: false,
+  mockQuestionIds: {},
   recentQuestionIds: [],
   lastStudyDate: new Date().toISOString().slice(0, 10)
 };
@@ -1213,11 +1214,30 @@ function withBalancedAnswerPositions(questions, seed) {
   });
 }
 
+function difficultyTargets(count, mode = "") {
+  const mockNumber = mockExamNumber(mode);
+  const hardRatio = mockNumber ? Math.min(0.3, 0.14 + mockNumber * 0.016) : 0.2;
+  const easyRatio = mockNumber ? Math.max(0.2, 0.38 - mockNumber * 0.018) : 0.3;
+  const easy = Math.round(count * easyRatio);
+  const hard = Math.round(count * hardRatio);
+  return { Easy: easy, Medium: Math.max(0, count - easy - hard), Hard: hard };
+}
+
+function balancedDifficultyQuestions(pool, count, progress, seed, mode = "") {
+  const targets = difficultyTargets(count, mode);
+  const parts = [
+    uniqueSessionQuestions(pool.filter((q) => q.difficulty === "Easy"), targets.Easy, progress, `${seed}-easy`),
+    uniqueSessionQuestions(pool.filter((q) => q.difficulty === "Medium"), targets.Medium, progress, `${seed}-medium`),
+    uniqueSessionQuestions(pool.filter((q) => q.difficulty === "Hard"), targets.Hard, progress, `${seed}-hard`)
+  ].flat();
+  return mergeUniqueQuestions(parts, pool, count, `${seed}-fill`);
+}
+
 function balancedMockQuestions(bank, mode, progress, count) {
   const categoryTargets = CATEGORIES.map((cat, idx) => ({ cat, count: mode === "Full Mock Exam" ? (idx === 3 ? 35 : 45) : Math.floor(count / CATEGORIES.length) + (idx < count % CATEGORIES.length ? 1 : 0) }));
   const picked = [];
   categoryTargets.forEach(({ cat, count: catCount }) => {
-    const perDifficulty = { Easy: Math.ceil(catCount * 0.3), Medium: Math.ceil(catCount * 0.45), Hard: catCount };
+    const perDifficulty = difficultyTargets(catCount, mode);
     const catPool = bank.filter((q) => q.category === cat.name);
     const parts = [
       uniqueSessionQuestions(catPool.filter((q) => q.difficulty === "Easy"), perDifficulty.Easy, progress, `${mode}-${cat.name}-easy-${Date.now()}`),
@@ -1235,12 +1255,11 @@ function balancedCategoryQuestions(pool, mode, progress, count) {
   subCategories.forEach((sub, idx) => {
     const target = Math.floor(count / subCategories.length) + (idx < count % subCategories.length ? 1 : 0);
     const subPool = pool.filter((q) => q.subCategory === sub);
-    const easy = Math.ceil(target * 0.3);
-    const medium = Math.ceil(target * 0.45);
+    const targets = difficultyTargets(target, mode);
     const parts = [
-      uniqueSessionQuestions(subPool.filter((q) => q.difficulty === "Easy"), easy, progress, `${mode}-${sub}-easy-${Date.now()}`),
-      uniqueSessionQuestions(subPool.filter((q) => q.difficulty === "Medium"), medium, progress, `${mode}-${sub}-medium-${Date.now()}`),
-      uniqueSessionQuestions(subPool.filter((q) => q.difficulty === "Hard"), target, progress, `${mode}-${sub}-hard-${Date.now()}`)
+      uniqueSessionQuestions(subPool.filter((q) => q.difficulty === "Easy"), targets.Easy, progress, `${mode}-${sub}-easy-${Date.now()}`),
+      uniqueSessionQuestions(subPool.filter((q) => q.difficulty === "Medium"), targets.Medium, progress, `${mode}-${sub}-medium-${Date.now()}`),
+      uniqueSessionQuestions(subPool.filter((q) => q.difficulty === "Hard"), targets.Hard, progress, `${mode}-${sub}-hard-${Date.now()}`)
     ].flat();
     picked.push(...mergeUniqueQuestions(parts, subPool, target, `${mode}-${sub}-balance-${Date.now()}`));
   });
@@ -1252,6 +1271,11 @@ function selectQuestions(category, mode, progress, subCategory = "All Topics", b
   let pool = bank.filter((q) => (category === "All Categories" || q.category === category) && (subCategory === "All Topics" || q.subCategory === subCategory));
   const isTopicLevel = subCategory !== "All Topics";
   const isCategoryLevel = category !== "All Categories" && subCategory === "All Topics";
+  const mockNumber = mockExamNumber(mode);
+  if (mockNumber) {
+    const usedMockIds = new Set(progress.mockQuestionIds?.[mockHistoryKey(category, subCategory)] || []);
+    pool = pool.filter((q) => !usedMockIds.has(q.id));
+  }
   if (mode === "Full Mock Exam") {
     return withBalancedAnswerPositions(balancedMockQuestions(bank, mode, progress, 170), `${mode}-${Date.now()}`);
   }
@@ -1269,14 +1293,17 @@ function selectQuestions(category, mode, progress, subCategory = "All Topics", b
     const weakPool = pool.filter((q) => weakSubs.includes(q.subCategory) || weakIds.includes(q.id));
     pool = weakPool.length >= 8 ? weakPool : pool.filter((q) => q.difficulty !== "Easy").concat(weakPool);
   }
-  const mockNumber = mockExamNumber(mode);
   const count = isTopicLevel ? 25 : isCategoryLevel ? 170 : mode === "Quick Review" ? 10 : mode === "Mini Quiz" ? 20 : mockNumber ? Math.min(170, 50 + (mockNumber - 1) * 12) : mode === "Timed Exam" ? 60 : mode === "Wrong Drill" ? 30 : mode === "Mastery Test" ? 50 : 25;
   if (mockNumber) {
-    if (category === "All Categories") return withBalancedAnswerPositions(balancedMockQuestions(bank, mode, progress, count), `${mode}-all-${Date.now()}`);
+    if (category === "All Categories") {
+      const usedMockIds = new Set(progress.mockQuestionIds?.[mockHistoryKey(category, subCategory)] || []);
+      const mockBank = bank.filter((q) => !usedMockIds.has(q.id));
+      return withBalancedAnswerPositions(balancedMockQuestions(mockBank, mode, progress, count), `${mode}-all-${Date.now()}`);
+    }
     if (subCategory === "All Topics") return withBalancedAnswerPositions(balancedCategoryQuestions(pool, mode, progress, count), `${mode}-${category}-${Date.now()}`);
-    return withBalancedAnswerPositions(uniqueSessionQuestions(pool, count, progress, `${mode}-${category}-${subCategory}-${Date.now()}`), `${mode}-${category}-${subCategory}-${Date.now()}`);
+    return withBalancedAnswerPositions(balancedDifficultyQuestions(pool, count, progress, `${mode}-${category}-${subCategory}-${Date.now()}`, mode), `${mode}-${category}-${subCategory}-${Date.now()}`);
   }
-  let selected = uniqueSessionQuestions(pool, count, progress, `${mode}-${category}-${subCategory}-${Date.now()}`);
+  let selected = balancedDifficultyQuestions(pool, count, progress, `${mode}-${category}-${subCategory}-${Date.now()}`, mode);
   if (selected.length < count && subCategory !== "All Topics") {
     const fallback = bank.filter((q) => q.category === category && q.subCategory !== subCategory);
     selected = mergeUniqueQuestions(selected, fallback, count, `${mode}-${category}-fallback-${Date.now()}`);
@@ -1365,6 +1392,10 @@ function isMockUnlocked(progress, mode) {
   const number = mockExamNumber(mode);
   if (!number || number === 1) return true;
   return hasPassedMock(progress, number - 1);
+}
+
+function mockHistoryKey(category, subCategory) {
+  return `${category || "All Categories"}|${subCategory || "All Topics"}`;
 }
 
 function lessonFor(category, topic) {
@@ -1911,11 +1942,16 @@ export default function App() {
     setProgress((p) => {
       const answered = { ...p.answered };
       const drillMastery = { ...(p.drillMastery || {}) };
+      const mockQuestionIds = { ...(p.mockQuestionIds || {}) };
       Object.entries(finalAnswers).forEach(([id, a]) => {
         answered[id] = { selected: a.selected, status: a.status, time: a.time, category: a.question.category, subCategory: a.question.subCategory, difficulty: a.question.difficulty, date: new Date().toISOString() };
         if (mode === "Wrong Drill") drillMastery[id] = a.status === "correct" ? (drillMastery[id] || 0) + 1 : 0;
       });
-      return { ...p, xp: p.xp + correct * 12 + (pct(correct, exam.questions.length) >= 80 ? 120 : 30), drillMastery, answered, recentQuestionIds: [...exam.questions.map((q) => q.id), ...(p.recentQuestionIds || [])].slice(0, 240), sessions: [...p.sessions, { date: new Date().toISOString(), category, subCategory, mode, score: correct, total: exam.questions.length, skipped: Object.values(finalAnswers).filter((a) => a.status === "skipped").length, accuracy: pct(correct, exam.questions.length) }].slice(-20) };
+      if (mockExamNumber(mode)) {
+        const key = mockHistoryKey(category, subCategory);
+        mockQuestionIds[key] = [...new Set([...(mockQuestionIds[key] || []), ...exam.questions.map((q) => q.id)])].slice(-2000);
+      }
+      return { ...p, xp: p.xp + correct * 12 + (pct(correct, exam.questions.length) >= 80 ? 120 : 30), drillMastery, mockQuestionIds, answered, recentQuestionIds: [...exam.questions.map((q) => q.id), ...(p.recentQuestionIds || [])].slice(0, 240), sessions: [...p.sessions, { date: new Date().toISOString(), category, subCategory, mode, score: correct, total: exam.questions.length, skipped: Object.values(finalAnswers).filter((a) => a.status === "skipped").length, accuracy: pct(correct, exam.questions.length) }].slice(-20) };
     });
     setExam((e) => ({ ...e, answers: finalAnswers, submitted: true }));
     setScreen("results");
@@ -1947,6 +1983,7 @@ export default function App() {
     const topicSelected = !!selectedCategory && subCategory !== "All Topics";
     const lesson = topicSelected ? selectedLesson : null;
     const topicReview = topicSelected ? reviewContentFor(category, subCategory) : null;
+    const completedMocks = MOCK_EXAM_MODES.filter((nextMode) => hasPassedMock(progress, mockExamNumber(nextMode))).length;
     const disabledClass = "cursor-not-allowed border border-white/10 bg-white/5 text-white/35";
     const primaryClass = "bg-white text-slate-950 hover:scale-[1.02]";
     const run = (nextMode) => {
@@ -1974,7 +2011,7 @@ export default function App() {
           <p className="mt-2 text-sm text-white/60">Start a focused 25-question test for the selected category or topic before moving into mock exams.</p>
           <button onClick={() => run("Mini Quiz")} className={`mt-4 inline-flex min-h-12 items-center justify-center gap-2 rounded-2xl px-5 font-bold transition ${hasSelection ? primaryClass : disabledClass}`}><Play className="h-4 w-4" />Start Topic Test</button>
         </div>
-        <div className="rounded-2xl bg-slate-900/45 p-4"><h4 className="mb-3 font-black">Mock Exam Progression</h4><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">{MOCK_EXAM_MODES.map((nextMode) => {
+        <div className="rounded-2xl bg-slate-900/45 p-4"><h4 className="mb-2 font-black">🔒 Mock Exam Progression</h4><p className="text-sm leading-7 text-white/65">Pass each Mock Exam to unlock the next level. Mock Exam 1 → Mock Exam 2 → Mock Exam 3 → ... → Mock Exam 10.</p><p className="mb-3 mt-2 text-sm font-bold text-emerald-100">Completed: {completedMocks} / 10 Mock Exams</p><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">{MOCK_EXAM_MODES.map((nextMode) => {
           const unlocked = isMockUnlocked(progress, nextMode);
           return <button key={nextMode} disabled={!hasSelection || !unlocked} onClick={() => run(nextMode)} className={`min-h-12 rounded-2xl px-4 font-bold transition ${hasSelection && unlocked ? "bg-white text-slate-950 hover:scale-[1.02]" : disabledClass}`}>{!unlocked && <Lock className="mr-2 inline h-4 w-4" />}{nextMode}</button>;
         })}</div></div>
@@ -1988,14 +2025,6 @@ export default function App() {
 
   const Dashboard = () => {
     const hasSelection = category !== "All Categories" || subCategory !== "All Topics";
-    const startIfAllowed = (nextMode) => {
-      if (!hasSelection || (mockExamNumber(nextMode) && !isMockUnlocked(progress, nextMode))) return;
-      startExam(category, nextMode, subCategory);
-    };
-    const openReviewCenter = () => {
-      setLearningTab("Learn");
-      if (typeof document !== "undefined") document.getElementById("review-center")?.scrollIntoView({ behavior: "smooth", block: "start" });
-    };
     return (
     <div className="mx-auto max-w-7xl px-4 py-8">
       <section className="mb-6 rounded-[1.5rem] border border-emerald-200/20 bg-emerald-300/10 p-5 backdrop-blur-xl">
@@ -2015,22 +2044,23 @@ export default function App() {
               <div key={label} className="rounded-2xl border border-white/10 bg-slate-900/55 p-4"><Icon className="mb-3 h-5 w-5 text-cyan-200" /><div className="text-2xl font-black">{value}</div><div className="text-xs text-white/55">{label}</div></div>
             ))}
           </div>
-          <div className="mt-6 grid gap-3 rounded-3xl border border-white/10 bg-slate-950/45 p-4 md:grid-cols-3">
-            <label className="text-xs font-bold text-white/60">Category
+          <div className="mt-6 rounded-3xl border border-emerald-200/40 bg-emerald-300/10 p-4 shadow-glow">
+            <div className="mb-3 flex flex-wrap items-center gap-2"><Pill className="border-emerald-200/40 bg-emerald-300/20 text-emerald-50">📍 START HERE</Pill><span className="text-sm font-bold text-emerald-100">Step 1: Select Category • Step 2: Select Topic/Sub-category</span></div>
+            <div className="grid gap-3 md:grid-cols-3">
+            <label className="text-xs font-black uppercase tracking-wide text-emerald-100">Step 1: Select Category
               <select value={category} onChange={(e) => { setCategory(e.target.value); setSubCategory("All Topics"); }} className="mt-2 min-h-12 w-full rounded-2xl border border-white/10 bg-slate-900 px-4 text-sm text-white">
                 <option>All Categories</option>
                 {CATEGORIES.map((cat) => <option key={cat.name}>{cat.name}</option>)}
               </select>
             </label>
-            <label className="text-xs font-bold text-white/60 md:col-span-2">Topic / Sub-category
+            <label className="text-xs font-black uppercase tracking-wide text-emerald-100 md:col-span-2">Step 2: Select Topic/Sub-category
               <select value={subCategory} onChange={(e) => setSubCategory(e.target.value)} className="mt-2 min-h-12 w-full rounded-2xl border border-white/10 bg-slate-900 px-4 text-sm text-white">
                 {availableTopics.map((topic) => <option key={topic}>{topic}</option>)}
               </select>
             </label>
+            </div>
           </div>
-          <div className="mt-4 flex flex-wrap gap-3">
-            <button onClick={openReviewCenter} className="inline-flex min-h-12 items-center gap-2 rounded-2xl bg-white px-5 font-black text-slate-950 transition hover:scale-[1.02]"><BookOpen className="h-4 w-4" />📚 Review Center</button>
-          </div>
+          <DynamicReviewCenter />
         </motion.section>
         <section className="rounded-[2rem] border border-white/10 bg-white/[.08] p-5 backdrop-blur-xl">
           <h3 className="mb-4 flex items-center gap-2 text-lg font-black"><Lightbulb className="text-yellow-200" /> Smart recommendations</h3>
@@ -2043,7 +2073,6 @@ export default function App() {
           <div className="mt-5 rounded-2xl bg-gradient-to-br from-emerald-400/20 to-sky-400/20 p-4"><div className="text-sm text-white/60">Current rank</div><div className="text-2xl font-black">{rankInfo.current}</div><div className="mt-3 flex justify-between text-xs text-white/60"><span>Progress to {rankInfo.next}</span><span>{rankInfo.progressToNext}%</span></div><div className="mt-2 h-2 rounded-full bg-white/10"><div className="h-full rounded-full bg-gradient-to-r from-emerald-300 to-cyan-300" style={{ width: `${rankInfo.progressToNext}%` }} /></div><p className="mt-2 text-[11px] text-white/45">Score {rankInfo.score}/100 from accuracy, answered volume, mastery tests, mock exams, and readiness.</p></div>
         </section>
       </div>
-      <DynamicReviewCenter />
       <section className="mt-6 rounded-[1.5rem] border border-white/10 bg-white/[.07] p-5 backdrop-blur-xl">
         <h3 className="mb-4 flex items-center gap-2 text-lg font-black"><Award className="text-amber-200" /> Achievements</h3>
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
@@ -2275,9 +2304,10 @@ export default function App() {
             <h3 className="text-2xl font-black text-red-100">🚫 Trial Expired</h3>
             <p className="mt-2 text-white/70">Your free trial has ended.</p>
             <div className="mt-5 rounded-2xl border border-amber-200/25 bg-amber-300/10 p-5 text-center">
-              <p className="text-xs font-black uppercase tracking-widest text-amber-100">{remainingFoundingSlots ? "FOUNDING MEMBER OFFER" : "FOUNDING MEMBER OFFER CLOSED"}</p>
-              <p className="mt-1 text-4xl font-black text-white">PHP 250 Lifetime Access</p>
-              <p className="mt-1 text-sm text-amber-100">{foundingMembers.length} / {FOUNDING_MEMBER_LIMIT} claimed - {remainingFoundingSlots} slots remaining</p>
+              <p className="text-xs font-black uppercase tracking-widest text-amber-100">Civil Service Exam Mastery</p>
+              <p className="mt-1 text-4xl font-black text-white">PHP 150</p>
+              <p className="mt-1 text-sm text-amber-100">1 Year Access</p>
+              <p className="mt-2 text-xs text-white/65">Affordable Civil Service Exam preparation for one full year.</p>
             </div>
             <div className="mt-5 space-y-2 text-sm text-white/75">
               <p className="font-black text-white">Unlock:</p>
