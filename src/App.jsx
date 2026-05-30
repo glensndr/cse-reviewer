@@ -1303,7 +1303,11 @@ function analyze(progress, bank = QUESTION_BANK) {
 }
 
 function buildQuestionBank(progress, cloudRows = []) {
-  const cloudQuestions = (cloudRows || []).filter((row) => !row.status || String(row.status).toLowerCase() === "approved").map(normalizeDbQuestion).filter(Boolean);
+  const cloudQuestions = (cloudRows || [])
+    .filter((row) => !row.status || String(row.status).toLowerCase() === "approved")
+    .filter((row) => !/^Based on imported reviewer\b/i.test(row.question || ""))
+    .map(normalizeDbQuestion)
+    .filter(Boolean);
   return [...QUESTION_BANK, ...cloudQuestions];
 }
 
@@ -1506,26 +1510,52 @@ function extractTopics(text) {
   return [...new Set(topics)].slice(0, 12);
 }
 
-function generatedFromImport(importItem, count = 12) {
-  const category = importItem.category;
-  const importTopics = Array.isArray(importItem.topics) ? importItem.topics : [];
-  const topics = importTopics.length ? importTopics : (CATEGORIES.find((c) => c.name === category)?.subs || ["Reviewer Concepts"]).slice(0, 4);
-  return Array.from({ length: count }, (_, i) => {
-    const topic = topics[i % topics.length];
-    const id = `IMP-${importItem.id}-${i}`;
-    const answer = `Apply the ${topic} rule using the facts given`;
-    return makeQuestion({
-      id,
+function detectAnswerFromText(text, choices) {
+  const answerMatch = text.match(/(?:answer|correct\s*answer|ans\.?)\s*[:\-]?\s*([A-D])\b/i);
+  if (answerMatch) return choices["ABCD".indexOf(answerMatch[1].toUpperCase())] || "";
+  const markedChoice = text.match(/^\s*([A-D])[\).\-\s]+(.+?)(?:\s*[✓✔*]\s*)$/im);
+  if (markedChoice) return markedChoice[2].trim();
+  return "";
+}
+
+function extractActualReviewerQuestions(text, importItem) {
+  const normalized = text.replace(/\r/g, "\n").replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
+  if (!normalized) return [];
+  const blocks = normalized
+    .split(/\n(?=\s*(?:\d{1,3}|Q\s*\d{1,3})[\).\-\s])/gi)
+    .map((block) => block.trim())
+    .filter(Boolean);
+  const category = importItem.category || categorizeText(`${importItem.name} ${normalized}`);
+  const questions = [];
+  blocks.forEach((block, index) => {
+    const choiceMatches = [...block.matchAll(/(?:^|\n)\s*([A-D])[\).\-\s]+([^\n]+?)(?=\n\s*[A-D][\).\-\s]+|\n\s*(?:answer|correct\s*answer|ans\.?)\b|$)/gi)];
+    if (choiceMatches.length < 4) return;
+    const firstChoiceAt = choiceMatches[0].index ?? block.search(/\n\s*A[\).\-\s]+/i);
+    const stem = block.slice(0, firstChoiceAt).replace(/^\s*(?:Q\s*)?\d{1,3}[\).\-\s]*/, "").trim();
+    if (!stem || stem.length < 12) return;
+    const choices = choiceMatches.slice(0, 4).map((match) => match[2].replace(/[✓✔*]\s*$/g, "").trim());
+    const answer = detectAnswerFromText(block, choices);
+    if (!answer || !choices.includes(answer)) return;
+    const subCategory = normalizeSubCategory(category, extractTopics(`${importItem.name} ${stem} ${choices.join(" ")}`)[0] || (importItem.topics || [])[0] || "Reviewer Questions");
+    questions.push({
+      id: `IMP-${importItem.id}-Q${String(index + 1).padStart(4, "0")}`,
       category,
-      subCategory: topic,
-      difficulty: DIFFICULTIES[i % 3],
-      question: `Based on imported reviewer "${importItem.name}", which approach is best for a ${topic} Civil Service item?`,
-      choices: [answer, "Choose the longest option without checking the rule", "Ignore keywords and rely on memory only", "Use the same answer letter pattern from previous items"],
+      subCategory,
+      difficulty: DIFFICULTIES[index % DIFFICULTIES.length],
+      question: stem,
+      choices,
       answer,
-      explanation: `This imported-reviewer variation is categorized under ${category}. The best approach is to identify the tested concept, use the facts in the item, and eliminate choices that do not match the rule.`,
-      hint: "Look for the concept keyword and match it to the rule.",
-      learningTip: `Review the imported notes for ${topic}, then answer similar variations until your reasoning is consistent.`
+      explanation: `Imported directly from ${importItem.name}. Review the source item and answer key for the official rationale.`,
+      hint: "Use the exact reviewer item and eliminate choices using the tested concept.",
+      learningTip: "Re-answer the original reviewer item until you can explain why the keyed answer is correct."
     });
+  });
+  const seen = new Set();
+  return questions.filter((q) => {
+    const key = `${q.question.toLowerCase()}|${q.choices.join("|").toLowerCase()}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
   });
 }
 
@@ -2212,8 +2242,12 @@ export default function App() {
       return;
     }
     const approvedBy = profile?.gmail_address || "Admin";
-    const count = Math.max(80, ((importItem.topics || []).length || 4) * 50);
-    const questions = generatedFromImport(importItem, count);
+    const questions = importItem.extractedQuestions || [];
+    if (!questions.length) {
+      const reason = importItem.extractionError || "No answer-keyed reviewer questions were detected in the extracted text.";
+      setImportMessage(`Transfer stopped for ${importItem.name}: ${reason} No AI or placeholder questions were created.`);
+      return;
+    }
     const rows = questions.map((q) => toQuestionBankRow(q, {
       source: "Imported",
       status: "Approved",
@@ -2328,28 +2362,38 @@ export default function App() {
 
   async function readReviewerFile(file) {
     const ext = file.name.split(".").pop().toLowerCase();
-    if (ext === "txt") return await file.text();
+    if (ext === "txt") return { text: await file.text(), method: "TXT text read", pagesRead: null, error: "" };
     if (ext === "docx") {
       const mammoth = await import("mammoth/mammoth.browser");
       const buffer = await file.arrayBuffer();
       const result = await mammoth.extractRawText({ arrayBuffer: buffer });
-      return result.value;
+      return { text: result.value, method: "DOCX raw text extraction", pagesRead: null, error: result.messages?.map((m) => m.message).join("; ") || "" };
     }
     if (ext === "pdf") {
-      const pdfjsLib = await import("pdfjs-dist/legacy/build/pdf.mjs");
-      pdfjsLib.GlobalWorkerOptions.workerSrc = new URL("pdfjs-dist/legacy/build/pdf.worker.mjs", import.meta.url).toString();
-      const buffer = await file.arrayBuffer();
-      const pdf = await pdfjsLib.getDocument({ data: buffer }).promise;
-      const pages = [];
-      const maxPages = Math.min(pdf.numPages, 12);
-      for (let pageNo = 1; pageNo <= maxPages; pageNo++) {
-        const page = await pdf.getPage(pageNo);
-        const content = await page.getTextContent();
-        pages.push(content.items.map((item) => item.str).join(" "));
+      try {
+        const pdfjsLib = await import("pdfjs-dist/legacy/build/pdf.mjs");
+        pdfjsLib.GlobalWorkerOptions.workerSrc = new URL("pdfjs-dist/legacy/build/pdf.worker.mjs", import.meta.url).toString();
+        const buffer = await file.arrayBuffer();
+        const pdf = await pdfjsLib.getDocument({ data: buffer }).promise;
+        const pages = [];
+        const maxPages = Math.min(pdf.numPages, 25);
+        for (let pageNo = 1; pageNo <= maxPages; pageNo++) {
+          const page = await pdf.getPage(pageNo);
+          const content = await page.getTextContent();
+          pages.push(content.items.map((item) => item.str).join(" "));
+        }
+        const text = pages.join("\n");
+        return {
+          text,
+          method: "PDF text-layer extraction using pdf.js getTextContent; OCR is not implemented",
+          pagesRead: `${maxPages}/${pdf.numPages}`,
+          error: text.trim() ? "" : "No selectable text was extracted. This may be a scanned/image PDF and requires OCR before import."
+        };
+      } catch (error) {
+        return { text: "", method: "PDF text-layer extraction using pdf.js getTextContent; OCR is not implemented", pagesRead: "0", error: error.message || "PDF extraction failed." };
       }
-      return pages.join("\n");
     }
-    return file.name;
+    return { text: "", method: "Unsupported file type", pagesRead: null, error: `${ext.toUpperCase()} import is not supported.` };
   }
 
   async function importReviewers(files) {
@@ -2357,11 +2401,12 @@ export default function App() {
     try {
       const imported = [];
       for (const file of Array.from(files)) {
-        const text = await readReviewerFile(file);
+        const extraction = await readReviewerFile(file);
+        const text = extraction.text || "";
         const fallbackText = text.trim() || file.name;
         const categoryGuess = categorizeText(`${file.name} ${fallbackText}`);
         const topics = extractTopics(`${file.name} ${fallbackText}`);
-        imported.push({
+        const draftItem = {
           id: `${file.name}-${file.size}-${file.lastModified}`.replace(/[^a-z0-9]/gi, "-"),
           name: file.name,
           size: file.size,
@@ -2370,10 +2415,23 @@ export default function App() {
           topics,
           lessons: fallbackText.split(/\n+/).map((line) => line.trim()).filter((line) => line.length > 40).slice(0, 8),
           concepts: fallbackText.split(/[.;\n]+/).map((line) => line.trim()).filter((line) => line.length > 20 && line.length < 180).slice(0, 12),
+          extractionMethod: extraction.method,
+          extractionPages: extraction.pagesRead,
+          extractionError: extraction.error,
+          rawTextPreview: text.slice(0, 12000),
           importedAt: new Date().toISOString()
+        };
+        const extractedQuestions = extractActualReviewerQuestions(text, draftItem);
+        imported.push({
+          ...draftItem,
+          extractedQuestions,
+          detectedQuestionCount: extractedQuestions.length,
+          importStatus: extraction.error ? "Extraction Error" : extractedQuestions.length ? "Questions Detected" : "No Questions Detected"
         });
       }
       setProgress((p) => ({ ...p, imports: [...(p.imports || []), ...imported].slice(-30) }));
+      const totalDetected = imported.reduce((sum, item) => sum + (item.detectedQuestionCount || 0), 0);
+      setImportMessage(totalDetected ? `${totalDetected} actual reviewer questions detected. Review the raw extracted text before transfer.` : "No actual answer-keyed reviewer questions were detected. Transfer is blocked; no synthetic questions were generated.");
       setScreen("admin");
     } finally {
       setImportBusy(false);
@@ -2756,7 +2814,7 @@ export default function App() {
     if (!isAdmin) return <div className="mx-auto max-w-4xl px-4 py-10"><section className="rounded-[2rem] border border-white/10 bg-white/[.08] p-7 text-center backdrop-blur-xl"><h2 className="text-3xl font-black">Admin Access Required</h2><p className="mt-3 text-white/60">Only accounts with the Admin role can manage users, licenses, sessions, and approvals.</p></section></div>;
     return <div className="mx-auto max-w-7xl px-4 py-8">
       <div className="rounded-[2rem] border border-white/10 bg-white/[.08] p-6 backdrop-blur-xl">
-        <div className="flex flex-wrap items-start justify-between gap-4"><div><p className="text-emerald-200">Reviewer Import System</p><h2 className="text-3xl font-black">Admin Import Module</h2><p className="mt-2 max-w-3xl text-sm text-white/60">Upload PDF, DOCX, or TXT reviewers. The app extracts text where available, detects category/topics, builds lessons/concepts, generates practice variations, and syncs imported reviewer metadata through Supabase progress storage.</p></div><label className="inline-flex min-h-12 cursor-pointer items-center gap-2 rounded-2xl bg-white px-5 font-black text-slate-950"><Upload className="h-4 w-4" />{importBusy ? "Analyzing..." : "Upload Reviewers"}<input type="file" multiple accept=".pdf,.docx,.txt" className="hidden" onChange={(e) => importReviewers(e.target.files)} /></label></div>
+        <div className="flex flex-wrap items-start justify-between gap-4"><div><p className="text-emerald-200">Reviewer Import System</p><h2 className="text-3xl font-black">Admin Import Module</h2><p className="mt-2 max-w-3xl text-sm text-white/60">Upload PDF, DOCX, or TXT reviewers. The app extracts available text, detects answer-keyed reviewer questions, shows the raw extraction preview, and blocks transfer when no actual questions are found.</p></div><label className="inline-flex min-h-12 cursor-pointer items-center gap-2 rounded-2xl bg-white px-5 font-black text-slate-950"><Upload className="h-4 w-4" />{importBusy ? "Analyzing..." : "Upload Reviewers"}<input type="file" multiple accept=".pdf,.docx,.txt" className="hidden" onChange={(e) => importReviewers(e.target.files)} /></label></div>
         <div className="mt-6 grid gap-3 md:grid-cols-5"><div className="rounded-2xl bg-slate-900/55 p-4"><div className="text-2xl font-black">{baseQuestions.length}</div><div className="text-xs text-white/50">Total Questions</div></div>{bankStats.map((s) => <div key={s.name} className="rounded-2xl bg-slate-900/55 p-4"><div className="text-2xl font-black">{s.count}</div><div className="text-xs text-white/50">{s.name}</div></div>)}</div>
         <div className="mt-3 grid gap-3 md:grid-cols-3">{difficultyStats.map((s) => <div key={s.name} className="rounded-2xl bg-slate-900/40 p-3"><div className="text-xl font-black">{s.count}</div><div className="text-xs text-white/50">{s.name} difficulty</div></div>)}</div>
         <div className="mt-5 rounded-2xl bg-slate-900/45 p-4"><h3 className="mb-3 font-black">Question Counts by Subcategory</h3><div className="grid max-h-72 gap-2 overflow-auto pr-1 sm:grid-cols-2 lg:grid-cols-4">{topicStats.map((s) => <div key={`${s.category}-${s.name}`} className="rounded-xl bg-white/5 p-3"><div className="text-sm font-bold">{s.name}</div><div className="text-xs text-white/45">{s.category}</div><div className="mt-1 text-lg font-black">{s.count}</div></div>)}</div></div>
@@ -2791,14 +2849,21 @@ export default function App() {
           <div className="space-y-3">
             {!(progress.imports || []).length && <p className="text-sm text-white/55">No uploaded files yet. Your local reviewer ZIPs are cataloged above; upload PDFs/DOCX/TXT here to expand the active bank.</p>}
             {(progress.imports || []).map((item) => {
-              const generatedCount = generatedFromImport(item, Math.max(80, ((item.topics || []).length || 4) * 50)).length;
+              const detectedCount = item.detectedQuestionCount || item.extractedQuestions?.length || 0;
               return <div key={item.id} className="rounded-2xl bg-slate-900/45 p-4">
                 <div className="flex justify-between gap-3"><b>{item.name}</b><Pill>{item.category}</Pill></div>
-                <p className="mt-2 text-xs text-white/50">{(item.topics || []).length ? item.topics.join(", ") : "General concepts detected"} - {generatedCount} generated questions</p>
+                <p className="mt-2 text-xs text-white/50">{(item.topics || []).length ? item.topics.join(", ") : "General concepts detected"} - {detectedCount} actual questions detected</p>
+                <p className="mt-2 text-xs text-white/50">Extraction: {item.extractionMethod || "Legacy import metadata only"}{item.extractionPages ? ` - Pages read: ${item.extractionPages}` : ""}</p>
+                {item.extractionError && <p className="mt-2 rounded-xl border border-red-200/20 bg-red-400/10 p-2 text-xs text-red-100">{item.extractionError}</p>}
                 <div className="mt-3 text-xs text-white/55">{(item.concepts || []).slice(0, 3).map((c) => <p key={c}>- {c}</p>)}</div>
+                <details className="mt-3 rounded-xl bg-slate-950/55 p-3 text-xs text-white/60">
+                  <summary className="cursor-pointer font-bold text-white/80">Show raw extracted text</summary>
+                  <pre className="mt-3 max-h-64 overflow-auto whitespace-pre-wrap leading-5">{item.rawTextPreview || "Raw extracted text was not saved for this legacy import. Re-upload the file to inspect extraction output."}</pre>
+                </details>
                 <div className="mt-4 flex flex-wrap items-center gap-2">
-                  <button onClick={() => publishImportedReviewer(item)} disabled={importBusy || item.publishedAt} className="rounded-xl bg-emerald-400/20 px-3 py-2 text-xs font-bold text-emerald-100 disabled:opacity-40">{item.publishedAt ? "Transferred to Bank" : "Approve & Transfer to Bank"}</button>
-                  {item.publishedAt && <Pill>{item.publishedCount || generatedCount} approved</Pill>}
+                  <button onClick={() => publishImportedReviewer(item)} disabled={importBusy || item.publishedAt || !detectedCount} className="rounded-xl bg-emerald-400/20 px-3 py-2 text-xs font-bold text-emerald-100 disabled:opacity-40">{item.publishedAt ? "Transferred to Bank" : "Approve & Transfer Exact Questions"}</button>
+                  {item.publishedAt && <Pill>{item.publishedCount || detectedCount} approved</Pill>}
+                  {!detectedCount && <Pill>No transfer: no actual questions</Pill>}
                 </div>
               </div>;
             })}
