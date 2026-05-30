@@ -20,6 +20,7 @@ import {
   Lightbulb,
   LineChart,
   ListFilter,
+  Lock,
   Play,
   RotateCcw,
   ShieldCheck,
@@ -32,8 +33,10 @@ import {
 } from "lucide-react";
 
 const STORAGE_KEY = "cse-pro-2026-mastery-simulator";
-const TRIAL_MINUTES = 30;
+const TRIAL_MINUTES = 60;
 const MAX_ACTIVE_DEVICES = 2;
+const MOCK_EXAM_MODES = Array.from({ length: 10 }, (_, i) => `Mock Exam ${i + 1}`);
+const FOUNDING_MEMBER_LIMIT = 30;
 
 const CATEGORIES = [
   {
@@ -842,6 +845,7 @@ const initialProgress = {
   imports: [],
   account: null,
   sessions: [],
+  onboardingComplete: false,
   recentQuestionIds: [],
   lastStudyDate: new Date().toISOString().slice(0, 10)
 };
@@ -1041,9 +1045,29 @@ function balancedMockQuestions(bank, mode, progress, count) {
   return mergeUniqueQuestions([], picked, count, `${mode}-final-${Date.now()}`);
 }
 
+function balancedCategoryQuestions(pool, mode, progress, count) {
+  const subCategories = [...new Set(pool.map((q) => q.subCategory))];
+  const picked = [];
+  subCategories.forEach((sub, idx) => {
+    const target = Math.floor(count / subCategories.length) + (idx < count % subCategories.length ? 1 : 0);
+    const subPool = pool.filter((q) => q.subCategory === sub);
+    const easy = Math.ceil(target * 0.3);
+    const medium = Math.ceil(target * 0.45);
+    const parts = [
+      uniqueSessionQuestions(subPool.filter((q) => q.difficulty === "Easy"), easy, progress, `${mode}-${sub}-easy-${Date.now()}`),
+      uniqueSessionQuestions(subPool.filter((q) => q.difficulty === "Medium"), medium, progress, `${mode}-${sub}-medium-${Date.now()}`),
+      uniqueSessionQuestions(subPool.filter((q) => q.difficulty === "Hard"), target, progress, `${mode}-${sub}-hard-${Date.now()}`)
+    ].flat();
+    picked.push(...mergeUniqueQuestions(parts, subPool, target, `${mode}-${sub}-balance-${Date.now()}`));
+  });
+  return mergeUniqueQuestions([], picked, count, `${mode}-category-final-${Date.now()}`);
+}
+
 function selectQuestions(category, mode, progress, subCategory = "All Topics", bankOverride = null) {
   const bank = bankOverride || buildQuestionBank(progress);
   let pool = bank.filter((q) => (category === "All Categories" || q.category === category) && (subCategory === "All Topics" || q.subCategory === subCategory));
+  const isTopicLevel = subCategory !== "All Topics";
+  const isCategoryLevel = category !== "All Categories" && subCategory === "All Topics";
   if (mode === "Full Mock Exam") {
     return balancedMockQuestions(bank, mode, progress, 170);
   }
@@ -1061,8 +1085,13 @@ function selectQuestions(category, mode, progress, subCategory = "All Topics", b
     const weakPool = pool.filter((q) => weakSubs.includes(q.subCategory) || weakIds.includes(q.id));
     pool = weakPool.length >= 8 ? weakPool : pool.filter((q) => q.difficulty !== "Easy").concat(weakPool);
   }
-  const count = mode === "Quick Review" ? 10 : mode === "Mini Quiz" ? 20 : mode === "Mock Exam 1" ? 50 : mode === "Mock Exam 2" ? 100 : mode === "Mock Exam 3" ? 150 : mode === "Timed Exam" ? 60 : mode === "Wrong Drill" ? 30 : mode === "Mastery Test" ? 50 : 25;
-  if (mode.includes("Mock Exam")) return balancedMockQuestions(bank, mode, progress, count);
+  const mockNumber = mockExamNumber(mode);
+  const count = isTopicLevel ? 25 : isCategoryLevel ? 170 : mode === "Quick Review" ? 10 : mode === "Mini Quiz" ? 20 : mockNumber ? Math.min(170, 50 + (mockNumber - 1) * 12) : mode === "Timed Exam" ? 60 : mode === "Wrong Drill" ? 30 : mode === "Mastery Test" ? 50 : 25;
+  if (mockNumber) {
+    if (category === "All Categories") return balancedMockQuestions(bank, mode, progress, count);
+    if (subCategory === "All Topics") return balancedCategoryQuestions(pool, mode, progress, count);
+    return uniqueSessionQuestions(pool, count, progress, `${mode}-${category}-${subCategory}-${Date.now()}`);
+  }
   let selected = uniqueSessionQuestions(pool, count, progress, `${mode}-${category}-${subCategory}-${Date.now()}`);
   if (selected.length < count && subCategory !== "All Topics") {
     const fallback = bank.filter((q) => q.category === category && q.subCategory !== subCategory);
@@ -1137,6 +1166,25 @@ function achievementList(progress, stats) {
     { title: "80% Numerical", detail: "Numerical Ability accuracy target", earned: (numerical?.accuracy || 0) >= 80 && (numerical?.total || 0) >= 10 },
     { title: "No Skipped Items", detail: "Completed a session without skipping", earned: !!latestSession && latestSession.skipped === 0 }
   ];
+}
+
+function mockExamNumber(mode) {
+  const match = String(mode || "").match(/^Mock Exam (\d+)$/);
+  return match ? Number(match[1]) : 0;
+}
+
+function hasPassedMock(progress, number) {
+  return (progress.sessions || []).some((session) => session.mode === `Mock Exam ${number}` && session.accuracy >= 80);
+}
+
+function isMockUnlocked(progress, mode) {
+  const number = mockExamNumber(mode);
+  if (!number || number === 1) return true;
+  return hasPassedMock(progress, number - 1);
+}
+
+function lessonFor(category, topic) {
+  return TOPIC_LESSONS.find((lesson) => lesson.category === category && lesson.topic === topic) || null;
 }
 
 function deviceFingerprint() {
@@ -1240,15 +1288,19 @@ export default function App() {
   const [screen, setScreen] = useState("dashboard");
   const [category, setCategory] = useState("All Categories");
   const [subCategory, setSubCategory] = useState("All Topics");
-  const [mode, setMode] = useState("Practice");
+  const [mode, setMode] = useState("Mastery Test");
   const [exam, setExam] = useState(null);
   const [reviewFilter, setReviewFilter] = useState("All");
+  const [learningTab, setLearningTab] = useState("Learn");
+  const [tourStep, setTourStep] = useState(0);
+  const [showTour, setShowTour] = useState(false);
   const [importBusy, setImportBusy] = useState(false);
   const [activeLesson, setActiveLesson] = useState(TOPIC_LESSONS[0]);
   const [authSession, setAuthSession] = useState(null);
   const [profile, setProfile] = useState(null);
   const [cloudUsers, setCloudUsers] = useState([]);
   const [adminMessage, setAdminMessage] = useState("");
+  const [adminSearch, setAdminSearch] = useState("");
   const [loginHistory, setLoginHistory] = useState([]);
   const [deviceSessions, setDeviceSessions] = useState([]);
   const [cloudQuestionRows, setCloudQuestionRows] = useState([]);
@@ -1271,6 +1323,9 @@ export default function App() {
     return ["All Topics", ...Array.from(topicSet).sort()];
   }, [category, allQuestions]);
   const achievements = useMemo(() => achievementList(progress, stats), [progress, stats]);
+  const selectedLesson = useMemo(() => lessonFor(category, subCategory), [category, subCategory]);
+  const foundingMembers = useMemo(() => cloudUsers.filter((user) => user.status === "Approved").slice(0, FOUNDING_MEMBER_LIMIT), [cloudUsers]);
+  const remainingFoundingSlots = Math.max(0, FOUNDING_MEMBER_LIMIT - foundingMembers.length);
 
   const trialExpiresAt = profile?.trial_expires_at ? new Date(profile.trial_expires_at).getTime() : 0;
   const trialActiveNow = profile?.status === "Trial Active" && trialExpiresAt > Date.now();
@@ -1290,6 +1345,10 @@ export default function App() {
       window.location.replace(`/auth/callback${url.search}`);
     }
   }, []);
+
+  useEffect(() => {
+    if (!cloudLoading && hasAccess && !progress.onboardingComplete) setShowTour(true);
+  }, [cloudLoading, hasAccess, progress.onboardingComplete]);
 
   async function ensureCloudProfile(session) {
     if (!supabase || !session?.user) return;
@@ -1505,6 +1564,12 @@ export default function App() {
     }
   }
 
+  function completeTour() {
+    setShowTour(false);
+    setTourStep(0);
+    setProgress((p) => ({ ...p, onboardingComplete: true }));
+  }
+
   async function gmailLogin() {
     if (!supabase) {
       setAccessMessage("Supabase is not configured. Add environment variables before using Gmail authentication.");
@@ -1618,8 +1683,9 @@ export default function App() {
     const safeSub = nextCategory === "All Categories" && nextMode === "Full Mock Exam" ? "All Topics" : nextSubCategory;
     const qs = selectQuestions(nextCategory, nextMode, progress, safeSub, allQuestions);
     setCategory(nextCategory); setMode(nextMode); setSubCategory(safeSub);
-    const timedModes = ["Timed Exam", "Mock Exam 1", "Mock Exam 2", "Mock Exam 3", "Full Mock Exam"];
-    const limit = nextMode === "Full Mock Exam" ? 10200 : nextMode === "Mock Exam 3" ? 9000 : nextMode === "Mock Exam 2" ? 6000 : nextMode === "Mock Exam 1" ? 3000 : 7200;
+    const timedModes = ["Timed Exam", ...MOCK_EXAM_MODES, "Full Mock Exam"];
+    const mockNumber = mockExamNumber(nextMode);
+    const limit = nextMode === "Full Mock Exam" ? 10200 : mockNumber ? Math.min(10200, 3000 + (mockNumber - 1) * 800) : 7200;
     const timed = timedModes.includes(nextMode);
     setExam({ questions: qs, index: 0, answers: {}, startedAt: Date.now(), currentStartedAt: Date.now(), timeLimit: timed ? limit : null, endsAt: timed ? Date.now() + limit * 1000 : null, submitted: false });
     setScreen("exam");
@@ -1635,7 +1701,7 @@ export default function App() {
       const status = statusOverride || (selected === q.answer ? "correct" : "wrong");
       return { ...e, answers: { ...e.answers, [q.id]: { selected, status, time: elapsed, question: q } } };
     });
-    if (!["Timed Exam", "Mock Exam 1", "Mock Exam 2", "Mock Exam 3", "Full Mock Exam"].includes(mode)) {
+    if (!["Timed Exam", ...MOCK_EXAM_MODES, "Full Mock Exam"].includes(mode)) {
       const elapsed = Math.max(1, Math.round((Date.now() - exam.currentStartedAt) / 1000));
       const status = statusOverride || (selected === q.answer ? "correct" : "wrong");
       setProgress((p) => ({
@@ -1691,9 +1757,62 @@ export default function App() {
     );
   };
 
+  const DynamicReviewCenter = () => {
+    const selectedCategory = CATEGORIES.find((cat) => cat.name === category);
+    const hasSelection = category !== "All Categories" || subCategory !== "All Topics";
+    const topicSelected = !!selectedCategory && subCategory !== "All Topics";
+    const lesson = topicSelected ? selectedLesson : null;
+    const disabledClass = "cursor-not-allowed border border-white/10 bg-white/5 text-white/35";
+    const primaryClass = "bg-white text-slate-950 hover:scale-[1.02]";
+    const run = (nextMode) => {
+      if (!hasSelection) return;
+      if (mockExamNumber(nextMode) && !isMockUnlocked(progress, nextMode)) return;
+      startExam(category, nextMode, subCategory);
+    };
+    return <section className="mt-6 rounded-[1.5rem] border border-white/10 bg-white/[.07] p-5 backdrop-blur-xl">
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <div><h3 className="text-xl font-black">Review Center</h3><p className="mt-1 text-sm text-white/55">This center follows your selected category and topic.</p></div>
+        <div className="rounded-2xl border border-white/10 bg-slate-950/45 p-1">
+          {["Learn", "Test"].map((tab) => <button key={tab} onClick={() => setLearningTab(tab)} className={`rounded-xl px-4 py-2 text-sm font-black ${learningTab === tab ? "bg-white text-slate-950" : "text-white/65"}`}>{tab}</button>)}
+        </div>
+      </div>
+      {!hasSelection && <div className="rounded-2xl bg-slate-900/45 p-6 text-center text-white/70">Select a category or topic to start learning.</div>}
+      {hasSelection && !topicSelected && selectedCategory && <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-4">
+        {selectedCategory.subs.map((topic) => <button key={topic} onClick={() => { setSubCategory(topic); setLearningTab("Learn"); }} className="rounded-2xl bg-slate-900/45 p-4 text-left transition hover:bg-white/10"><b>{topic}</b><p className="mt-2 text-xs text-white/45">{allQuestions.filter((q) => q.category === selectedCategory.name && q.subCategory === topic).length} questions available</p></button>)}
+      </div>}
+      {topicSelected && lesson && learningTab === "Learn" && <div className="grid gap-4 lg:grid-cols-2">
+        {[["Lessons", [lesson.introduction, lesson.explanation]], ["Notes", [lesson.notes, lesson.memoryAid]], ["Review Materials", lesson.examples], ["Exam Strategies", lesson.techniques], ["Tips and Tricks", lesson.tips], ["Topic Guides", lesson.stepGuide], ["Memory Techniques", [lesson.memoryAid, "Use short recall checks after each set of items."]], ["Common Exam Patterns", ["Frequently tested concepts appear as direct rule checks, scenario judgment, and elimination items.", "Common traps include absolute wording, wrong operation, and familiar but unsupported choices."]], ["Practice Examples", lesson.examples], ["Most Missed Questions", stats.subStats.find((s) => s.name === subCategory)?.wrong ? [`You have missed ${stats.subStats.find((s) => s.name === subCategory)?.wrong} item(s) in this topic. Use Wrong Drill until corrected.`] : ["Most missed items appear after you answer this topic."]]].map(([title, rows]) => <div key={title} className="rounded-2xl bg-slate-900/45 p-4"><h4 className="font-black">{title}</h4>{rows.map((row) => <p key={row} className="mt-2 text-sm leading-7 text-white/65">{row}</p>)}</div>)}
+      </div>}
+      {hasSelection && learningTab === "Test" && <div className="space-y-5">
+        <div className="grid gap-3 sm:grid-cols-2">
+          {["Mastery Test", "Wrong Drill"].map((nextMode) => <button key={nextMode} onClick={() => run(nextMode)} className={`inline-flex min-h-12 items-center justify-center gap-2 rounded-2xl px-5 font-bold transition ${hasSelection ? primaryClass : disabledClass}`}><Play className="h-4 w-4" />{nextMode}</button>)}
+        </div>
+        <div className="rounded-2xl bg-slate-900/45 p-4"><h4 className="mb-3 font-black">Mock Exam Progression</h4><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">{MOCK_EXAM_MODES.map((nextMode) => {
+          const unlocked = isMockUnlocked(progress, nextMode);
+          return <button key={nextMode} disabled={!hasSelection || !unlocked} onClick={() => run(nextMode)} className={`min-h-12 rounded-2xl px-4 font-bold transition ${hasSelection && unlocked ? "bg-white text-slate-950 hover:scale-[1.02]" : disabledClass}`}>{!unlocked && <Lock className="mr-2 inline h-4 w-4" />}{nextMode}</button>;
+        })}</div></div>
+        <div className="rounded-2xl border border-amber-200/20 bg-amber-300/10 p-5">
+          <h4 className="text-xl font-black">Full CSE Simulation</h4><p className="mt-2 text-sm text-white/70">170 questions. Actual exam experience. Final challenge. Recommended after completing Mock Exam 10.</p>
+          <button disabled={!hasSelection} onClick={() => startExam("All Categories", "Full Mock Exam", "All Topics")} className={`mt-4 inline-flex min-h-12 items-center gap-2 rounded-2xl px-5 font-black ${hasSelection ? "bg-emerald-300 text-slate-950" : disabledClass}`}><Trophy className="h-4 w-4" />Start Full Simulation</button>
+        </div>
+      </div>}
+    </section>;
+  };
+
   const Dashboard = () => {
+    const hasSelection = category !== "All Categories" || subCategory !== "All Topics";
+    const startIfAllowed = (nextMode) => {
+      if (!hasSelection || (mockExamNumber(nextMode) && !isMockUnlocked(progress, nextMode))) return;
+      startExam(category, nextMode, subCategory);
+    };
     return (
     <div className="mx-auto max-w-7xl px-4 py-8">
+      <section className="mb-6 rounded-[1.5rem] border border-emerald-200/20 bg-emerald-300/10 p-5 backdrop-blur-xl">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div><h2 className="text-xl font-black">How to Use CSE Mastery</h2><p className="mt-2 max-w-4xl text-sm leading-7 text-white/70">Step 1: Select Category. Step 2: Select Topic. Step 3: Study in Learn Tab. Step 4: Take Mastery Test. Step 5: Use Wrong Drill. Step 6: Progress through Mock Exam 1 to Mock Exam 10. Step 7: Take the Full CSE Simulation.</p></div>
+          <button onClick={() => { setTourStep(0); setShowTour(true); }} className="rounded-2xl bg-white px-5 py-3 font-black text-slate-950">Open Guide</button>
+        </div>
+      </section>
       <div className="grid gap-4 lg:grid-cols-[1.35fr_.65fr]">
         <motion.section initial={false} animate={{ opacity: 1, y: 0 }} className="overflow-hidden rounded-[2rem] border border-white/10 bg-white/[.08] p-6 shadow-2xl backdrop-blur-xl">
           <div className="flex flex-wrap items-start justify-between gap-4">
@@ -1719,15 +1838,14 @@ export default function App() {
             </label>
           </div>
           <div className="mt-4 flex flex-wrap gap-3">
-            {["Practice", "Mastery Test", "Wrong Drill", "Mock Exam 1", "Mock Exam 2", "Mock Exam 3", "Full Mock Exam"].map((m) => <button key={m} onClick={() => { setMode(m); startExam(m.includes("Mock") ? "All Categories" : category, m, m.includes("Mock") ? "All Topics" : subCategory); }} className="inline-flex min-h-12 items-center gap-2 rounded-2xl bg-white px-5 font-bold text-slate-950 transition hover:scale-[1.02]"><Play className="h-4 w-4" />{m}</button>)}
-            <button onClick={() => setScreen("review")} className="inline-flex min-h-12 items-center gap-2 rounded-2xl border border-white/10 bg-white/10 px-5 font-bold"><ListFilter className="h-4 w-4" />Review Center</button>
+            {["Mastery Test", "Wrong Drill"].map((m) => <button key={m} disabled={!hasSelection} onClick={() => startIfAllowed(m)} className={`inline-flex min-h-12 items-center gap-2 rounded-2xl px-5 font-bold transition ${hasSelection ? "bg-white text-slate-950 hover:scale-[1.02]" : "cursor-not-allowed border border-white/10 bg-white/5 text-white/35"}`}><Play className="h-4 w-4" />{m}</button>)}
             <button onClick={resetProgress} className="inline-flex min-h-12 items-center gap-2 rounded-2xl border border-red-200/30 bg-red-400/15 px-5 font-bold text-red-100 transition hover:bg-red-400/25"><RotateCcw className="h-4 w-4" />Reset Scores</button>
           </div>
         </motion.section>
         <section className="rounded-[2rem] border border-white/10 bg-white/[.08] p-5 backdrop-blur-xl">
           <h3 className="mb-4 flex items-center gap-2 text-lg font-black"><Lightbulb className="text-yellow-200" /> Smart recommendations</h3>
           <div className="space-y-3 text-sm text-white/75">
-            <p>{stats.weakest ? `You need more practice in ${stats.weakest.name}. Current accuracy is ${stats.weakest.accuracy}%.` : "Start with Practice Mode to establish your first diagnostic baseline."}</p>
+            <p>{stats.weakest ? `You need more practice in ${stats.weakest.name}. Current accuracy is ${stats.weakest.accuracy}%.` : "Start with a topic Mastery Test to establish your first diagnostic baseline."}</p>
             <p>{stats.strongest ? `Your strongest sub-category is ${stats.strongest.name} at ${stats.strongest.accuracy}% accuracy.` : "Your strongest category will appear after a few answered items."}</p>
             <p>{progress.sessions.length >= 2 ? `Your latest exam trend is ${progress.sessions.at(-1).accuracy - progress.sessions.at(-2).accuracy >= 0 ? "improving" : "dipping"} by ${Math.abs(progress.sessions.at(-1).accuracy - progress.sessions.at(-2).accuracy)}%.` : "Complete a timed exam to unlock improvement trend insights."}</p>
             <p>Exam Readiness Score: {readiness.score}%. Status: {readiness.status}.</p>
@@ -1735,6 +1853,7 @@ export default function App() {
           <div className="mt-5 rounded-2xl bg-gradient-to-br from-emerald-400/20 to-sky-400/20 p-4"><div className="text-sm text-white/60">Current rank</div><div className="text-2xl font-black">{rankInfo.current}</div><div className="mt-3 flex justify-between text-xs text-white/60"><span>Progress to {rankInfo.next}</span><span>{rankInfo.progressToNext}%</span></div><div className="mt-2 h-2 rounded-full bg-white/10"><div className="h-full rounded-full bg-gradient-to-r from-emerald-300 to-cyan-300" style={{ width: `${rankInfo.progressToNext}%` }} /></div><p className="mt-2 text-[11px] text-white/45">Score {rankInfo.score}/100 from accuracy, answered volume, mastery tests, mock exams, and readiness.</p></div>
         </section>
       </div>
+      <DynamicReviewCenter />
       <section className="mt-6 rounded-[1.5rem] border border-white/10 bg-white/[.07] p-5 backdrop-blur-xl">
         <h3 className="mb-4 flex items-center gap-2 text-lg font-black"><Award className="text-amber-200" /> Achievements</h3>
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
@@ -1746,25 +1865,6 @@ export default function App() {
           ))}
         </div>
       </section>
-      <h3 className="mb-4 mt-8 text-xl font-black">Exam Coverage</h3>
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        {CATEGORIES.map((cat, idx) => {
-          const s = stats.categoryStats.find((x) => x.name === cat.name) || {};
-          const Icon = cat.icon;
-          const weakness = s.total && s.accuracy < 70;
-          return (
-            <motion.button key={cat.name} initial={false} animate={{ opacity: 1, y: 0 }} transition={{ delay: idx * .05 }} onClick={() => { setCategory(cat.name); setSubCategory("All Topics"); setMode("Practice"); startExam(cat.name, "Practice", "All Topics"); }} className="group rounded-[1.5rem] border border-white/10 bg-white/[.07] p-5 text-left backdrop-blur-xl transition hover:-translate-y-1 hover:bg-white/[.11]">
-              <div className={`mb-5 grid h-12 w-12 place-items-center rounded-2xl bg-gradient-to-br ${cat.accent} text-slate-950`}><Icon /></div>
-              <h4 className="text-lg font-black">{cat.name}</h4>
-              <p className="mt-1 min-h-10 text-sm text-white/55">{cat.subs.slice(0, 4).join(" • ")}</p>
-              <div className="mt-4 space-y-3">
-                {[["Completion", s.completion || 0], ["Accuracy", s.accuracy || 0], ["Mastery", Math.round(((s.completion || 0) + (s.accuracy || 0)) / 2)]].map(([l, v]) => <div key={l}><div className="mb-1 flex justify-between text-xs text-white/55"><span>{l}</span><span>{v}%</span></div><div className="h-2 rounded-full bg-white/10"><div className={`h-full rounded-full bg-gradient-to-r ${cat.accent}`} style={{ width: `${v}%` }} /></div></div>)}
-              </div>
-              <div className="mt-4 flex items-center justify-between text-xs"><Pill>{s.total || 0} answered</Pill><span className={weakness ? "text-red-200" : "text-emerald-200"}>{weakness ? "Weakness flagged" : "Building mastery"}</span></div>
-            </motion.button>
-          );
-        })}
-      </div>
       <Analytics />
     </div>
     );
@@ -1784,16 +1884,17 @@ export default function App() {
       </div>
       <div className="rounded-[1.5rem] border border-white/10 bg-white/[.07] p-5 backdrop-blur-xl">
         <h3 className="mb-4 flex items-center gap-2 text-lg font-black"><TrendingUp className="text-emerald-200" /> Heat Map</h3>
+        <p className="mb-3 text-xs leading-6 text-white/55">Each square represents your study activity and performance history. More highlighted cells indicate greater activity and mastery.</p>
         <div className="grid grid-cols-5 gap-2">
           {stats.subStats.slice(0, 25).map((s) => <div key={s.name} title={`${s.name}: ${s.accuracy}%`} className={`aspect-square rounded-xl ${s.accuracy >= 80 ? "bg-emerald-400" : s.accuracy >= 60 ? "bg-yellow-300" : "bg-red-400"}`} />)}
           {!stats.subStats.length && Array.from({ length: 25 }, (_, i) => <div key={i} className="aspect-square rounded-xl bg-white/10" />)}
         </div>
       </div>
       <div className="rounded-[1.5rem] border border-white/10 bg-white/[.07] p-5 backdrop-blur-xl lg:col-span-3">
-        <h3 className="mb-4 flex items-center gap-2 text-lg font-black"><Target className="text-emerald-200" /> Per-Subcategory Mastery Map</h3>
+        <h3 className="mb-4 flex items-center gap-2 text-lg font-black"><BookOpen className="text-emerald-200" /> Review Library</h3>
         <div className="grid max-h-[520px] gap-3 overflow-auto pr-1 sm:grid-cols-2 lg:grid-cols-3">
           {subRows.map((s) => (
-            <button key={`${s.category}-${s.name}`} onClick={() => { const cat = CATEGORIES.find((c) => c.short === s.category)?.name || "All Categories"; setCategory(cat); setSubCategory(s.name); startExam(cat, "Practice", s.name); }} className="rounded-2xl bg-slate-900/45 p-4 text-left transition hover:bg-white/10">
+            <button key={`${s.category}-${s.name}`} onClick={() => { const cat = CATEGORIES.find((c) => c.short === s.category)?.name || "All Categories"; setCategory(cat); setSubCategory(s.name); setLearningTab("Learn"); }} className="rounded-2xl bg-slate-900/45 p-4 text-left transition hover:bg-white/10">
               <div className="mb-2 flex items-start justify-between gap-3"><div><b className="text-sm">{s.name}</b><div className="text-[11px] text-white/45">{s.category}</div></div><span className={`text-sm font-black ${s.accuracy >= 80 ? "text-emerald-200" : s.accuracy >= 60 ? "text-yellow-200" : "text-red-200"}`}>{masteryLevel(s.accuracy, s.total)}</span></div>
               <div className="h-2 rounded-full bg-white/10"><div className={`h-full rounded-full ${s.accuracy >= 80 ? "bg-emerald-300" : s.accuracy >= 60 ? "bg-yellow-300" : "bg-red-300"}`} style={{ width: `${s.accuracy}%` }} /></div>
               <div className="mt-2 grid grid-cols-2 gap-1 text-xs text-white/45"><span>Available: {s.available}</span><span>Answered: {s.total}</span><span>Correct: {s.correct}</span><span>Incorrect: {s.wrong}</span><span>Accuracy: {s.accuracy}%</span><span>{masteryLevel(s.accuracy, s.total)}</span></div>
@@ -1808,7 +1909,7 @@ export default function App() {
     if (!exam) return null;
     const q = exam.questions[exam.index];
     const ans = exam.answers[q.id];
-    const examLike = ["Timed Exam", "Mock Exam 1", "Mock Exam 2", "Mock Exam 3", "Full Mock Exam"].includes(mode);
+    const examLike = ["Timed Exam", ...MOCK_EXAM_MODES, "Full Mock Exam"].includes(mode);
     const feedbackVisible = !examLike && ans;
     const score = Object.values(exam.answers).filter((a) => a.status === "correct").length;
     useEffect(() => {
@@ -1898,7 +1999,7 @@ export default function App() {
         </div>
       </aside>
       <section className="rounded-[1.5rem] border border-white/10 bg-white/[.07] p-6 backdrop-blur-xl">
-        <div className="mb-4 flex flex-wrap items-center justify-between gap-3"><div><p className="text-sm text-emerald-200">{activeLesson.category}</p><h2 className="text-3xl font-black">{activeLesson.topic}</h2></div><button onClick={() => { setCategory(activeLesson.category); setSubCategory(activeLesson.topic); startExam(activeLesson.category, "Practice", activeLesson.topic); }} className="rounded-2xl bg-emerald-300 px-5 py-3 font-black text-slate-950">Guided Practice</button></div>
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3"><div><p className="text-sm text-emerald-200">{activeLesson.category}</p><h2 className="text-3xl font-black">{activeLesson.topic}</h2></div><button onClick={() => { setCategory(activeLesson.category); setSubCategory(activeLesson.topic); startExam(activeLesson.category, "Mini Quiz", activeLesson.topic); }} className="rounded-2xl bg-emerald-300 px-5 py-3 font-black text-slate-950">Guided Quiz</button></div>
         {[["Topic Introduction", activeLesson.introduction], ["Detailed Explanation", activeLesson.explanation], ["Study Notes", activeLesson.notes], ["Memory Aid", activeLesson.memoryAid]].map(([title, body]) => <div key={title} className="mb-4 rounded-2xl bg-slate-900/45 p-4"><h3 className="font-black">{title}</h3><p className="mt-2 text-sm leading-7 text-white/70">{body}</p></div>)}
         {activeLesson.category === "Numerical Ability" && NUMERICAL_LESSON_DETAILS[activeLesson.topic] && <div className="mb-4 rounded-2xl border border-amber-200/20 bg-amber-300/10 p-5">
           <h3 className="mb-3 text-xl font-black text-amber-100">Numerical Formula Lab</h3>
@@ -1921,6 +2022,8 @@ export default function App() {
   const Admin = () => {
     const bankStats = CATEGORIES.map((cat) => ({ name: cat.name, count: allQuestions.filter((q) => q.category === cat.name).length }));
     const topicStats = CATEGORIES.flatMap((cat) => cat.subs.map((sub) => ({ category: cat.short, name: sub, count: allQuestions.filter((q) => q.category === cat.name && q.subCategory === sub).length })));
+    const searchedUsers = cloudUsers.filter((user) => `${user.full_name} ${user.gmail_address} ${user.status}`.toLowerCase().includes(adminSearch.toLowerCase()));
+    const pendingUsers = searchedUsers.filter((user) => ["Trial Pending", "Trial Active"].includes(user.status));
     if (!isAdmin) return <div className="mx-auto max-w-4xl px-4 py-10"><section className="rounded-[2rem] border border-white/10 bg-white/[.08] p-7 text-center backdrop-blur-xl"><h2 className="text-3xl font-black">Admin Access Required</h2><p className="mt-3 text-white/60">Only accounts with the Admin role can manage users, licenses, sessions, and approvals.</p></section></div>;
     return <div className="mx-auto max-w-7xl px-4 py-8">
       <div className="rounded-[2rem] border border-white/10 bg-white/[.08] p-6 backdrop-blur-xl">
@@ -1929,9 +2032,15 @@ export default function App() {
         <div className="mt-5 rounded-2xl bg-slate-900/45 p-4"><h3 className="mb-3 font-black">Question Counts by Subcategory</h3><div className="grid max-h-72 gap-2 overflow-auto pr-1 sm:grid-cols-2 lg:grid-cols-4">{topicStats.map((s) => <div key={`${s.category}-${s.name}`} className="rounded-xl bg-white/5 p-3"><div className="text-sm font-bold">{s.name}</div><div className="text-xs text-white/45">{s.category}</div><div className="mt-1 text-lg font-black">{s.count}</div></div>)}</div></div>
       </div>
       <div className="mt-5 grid gap-4 lg:grid-cols-2">
+        <section className="rounded-[1.5rem] border border-amber-200/20 bg-amber-300/10 p-5 backdrop-blur-xl lg:col-span-2">
+          <div className="flex flex-wrap items-start justify-between gap-4"><div><h3 className="text-xl font-black">Admin Approval Dashboard</h3><p className="mt-1 text-sm text-white/60">Review recently registered users, approve access, reject suspicious accounts, and monitor founding member slots.</p></div><input value={adminSearch} onChange={(e) => setAdminSearch(e.target.value)} placeholder="Search user" className="min-h-11 rounded-2xl border border-white/10 bg-slate-900 px-4 text-sm text-white" /></div>
+          <div className="mt-4 grid gap-3 md:grid-cols-4"><div className="rounded-2xl bg-slate-950/45 p-4"><div className="text-2xl font-black">{pendingUsers.length}</div><div className="text-xs text-white/50">Pending / Trial Users</div></div><div className="rounded-2xl bg-slate-950/45 p-4"><div className="text-2xl font-black">{foundingMembers.length}</div><div className="text-xs text-white/50">Founding Members</div></div><div className="rounded-2xl bg-slate-950/45 p-4"><div className="text-2xl font-black">{remainingFoundingSlots}</div><div className="text-xs text-white/50">Remaining Slots</div></div><div className="rounded-2xl bg-slate-950/45 p-4"><div className="text-2xl font-black">{FOUNDING_MEMBER_LIMIT}</div><div className="text-xs text-white/50">Founding Slot Limit</div></div></div>
+          <div className="mt-4 max-h-72 space-y-3 overflow-auto pr-1">{pendingUsers.map((u) => <div key={`approval-${u.user_id}`} className="rounded-2xl bg-slate-950/45 p-4"><div className="flex flex-wrap items-center justify-between gap-3"><div><b>{u.full_name}</b><p className="text-xs text-white/50">{u.gmail_address} • {u.status} • Registered {new Date(u.registration_date).toLocaleDateString()}</p></div><div className="flex gap-2"><button onClick={() => updateUserStatus(u.user_id, "Approved")} className="rounded-xl bg-emerald-400/20 px-3 py-2 text-xs font-bold text-emerald-100">Approve</button><button onClick={() => updateUserStatus(u.user_id, "Suspended")} className="rounded-xl bg-red-400/20 px-3 py-2 text-xs font-bold text-red-100">Reject</button></div></div></div>)}{!pendingUsers.length && <p className="text-sm text-white/55">No pending or trial users match the current search.</p>}</div>
+          <div className="mt-4 rounded-2xl bg-slate-950/45 p-4"><h4 className="font-black">Founding Member List</h4><p className="mt-2 text-sm text-white/60">{foundingMembers.map((u) => u.gmail_address).join(", ") || "No approved founding members yet."}</p></div>
+        </section>
         <section className="rounded-[1.5rem] border border-white/10 bg-white/[.07] p-5 backdrop-blur-xl"><h3 className="mb-3 text-lg font-black">Built-In Reviewer Catalog</h3><div className="space-y-2">{BUILT_IN_REVIEWERS.map((name) => <div key={name} className="rounded-2xl bg-slate-900/45 p-3 text-sm text-white/70">{name}</div>)}</div></section>
         <section className="rounded-[1.5rem] border border-white/10 bg-white/[.07] p-5 backdrop-blur-xl"><h3 className="mb-3 text-lg font-black">Imported Files</h3><div className="space-y-3">{!(progress.imports || []).length && <p className="text-sm text-white/55">No uploaded files yet. Your local reviewer ZIPs are cataloged above; upload PDFs/DOCX/TXT here to expand the active bank.</p>}{(progress.imports || []).map((item) => <div key={item.id} className="rounded-2xl bg-slate-900/45 p-4"><div className="flex justify-between gap-3"><b>{item.name}</b><Pill>{item.category}</Pill></div><p className="mt-2 text-xs text-white/50">{item.topics.length ? item.topics.join(", ") : "General concepts detected"} • {generatedFromImport(item, Math.max(80, ((item.topics || []).length || 4) * 50)).length} generated questions</p><div className="mt-3 text-xs text-white/55">{item.concepts.slice(0, 3).map((c) => <p key={c}>• {c}</p>)}</div></div>)}</div></section>
-        <section className="rounded-[1.5rem] border border-white/10 bg-white/[.07] p-5 backdrop-blur-xl lg:col-span-2"><h3 className="mb-3 text-lg font-black">Admin: Users, Licenses, Active Sessions</h3>{adminMessage && <div className="mb-3 rounded-2xl border border-amber-200/30 bg-amber-300/10 p-3 text-sm text-amber-100">{adminMessage}</div>}<div className="grid gap-3 md:grid-cols-4"><div className="rounded-2xl bg-slate-900/45 p-4"><div className="text-2xl font-black">{cloudUsers.length}</div><div className="text-xs text-white/50">Registered Users</div></div><div className="rounded-2xl bg-slate-900/45 p-4"><div className="text-2xl font-black">{cloudUsers.filter((u) => u.status === "Approved").length}</div><div className="text-xs text-white/50">Approved Licenses</div></div><div className="rounded-2xl bg-slate-900/45 p-4"><div className="text-2xl font-black">{cloudUsers.reduce((sum, u) => sum + (u.device_sessions?.length || 0), 0)}</div><div className="text-xs text-white/50">Tracked Devices</div></div><div className="rounded-2xl bg-slate-900/45 p-4"><div className="text-2xl font-black">Future</div><div className="text-xs text-white/50">Revenue Tracking</div></div></div><div className="mt-4 space-y-3">{!cloudUsers.length && <p className="text-sm text-white/55">No Gmail accounts registered yet.</p>}{cloudUsers.map((u) => <div key={u.user_id} className="rounded-2xl bg-slate-900/45 p-4"><div className="flex flex-wrap items-center justify-between gap-3"><div><b>{u.full_name}</b><p className="text-xs text-white/50">{u.gmail_address} • Registered {new Date(u.registration_date).toLocaleDateString()} • Last login {u.last_login ? new Date(u.last_login).toLocaleString() : "Never"}</p></div><div className="flex flex-wrap gap-2"><Pill>{u.status}</Pill><button onClick={() => updateUserStatus(u.user_id, "Approved")} className="rounded-xl bg-emerald-400/20 px-3 py-2 text-xs font-bold text-emerald-100">Approve</button><button onClick={() => extendTrial(u.user_id)} className="rounded-xl bg-cyan-400/20 px-3 py-2 text-xs font-bold text-cyan-100">Extend Trial</button><button onClick={() => updateUserStatus(u.user_id, "Suspended")} className="rounded-xl bg-red-400/20 px-3 py-2 text-xs font-bold text-red-100">Suspend</button><button onClick={() => updateUserStatus(u.user_id, "Expired")} className="rounded-xl bg-white/10 px-3 py-2 text-xs font-bold">Revoke</button></div></div><div className="mt-3 grid gap-2 md:grid-cols-2">{(u.device_sessions || []).map((d) => <div key={d.id} className="rounded-xl bg-white/5 p-3 text-xs text-white/60">{d.device_info}<br />Last: {new Date(d.last_login).toLocaleString()}<br />Active: {d.active ? "Yes" : "No"}</div>)}</div><div className="mt-3 max-h-28 overflow-auto text-xs text-white/50">{(u.login_history || []).slice(0, 5).map((h) => <p key={h.id}>{new Date(h.created_at).toLocaleString()} • {h.device_info} • {h.action}</p>)}</div></div>)}</div></section>
+        <section className="rounded-[1.5rem] border border-white/10 bg-white/[.07] p-5 backdrop-blur-xl lg:col-span-2"><h3 className="mb-3 text-lg font-black">Admin: Users, Licenses, Active Sessions</h3>{adminMessage && <div className="mb-3 rounded-2xl border border-amber-200/30 bg-amber-300/10 p-3 text-sm text-amber-100">{adminMessage}</div>}<div className="grid gap-3 md:grid-cols-4"><div className="rounded-2xl bg-slate-900/45 p-4"><div className="text-2xl font-black">{cloudUsers.length}</div><div className="text-xs text-white/50">Registered Users</div></div><div className="rounded-2xl bg-slate-900/45 p-4"><div className="text-2xl font-black">{cloudUsers.filter((u) => u.status === "Approved").length}</div><div className="text-xs text-white/50">Approved Licenses</div></div><div className="rounded-2xl bg-slate-900/45 p-4"><div className="text-2xl font-black">{cloudUsers.reduce((sum, u) => sum + (u.device_sessions?.length || 0), 0)}</div><div className="text-xs text-white/50">Tracked Devices</div></div><div className="rounded-2xl bg-slate-900/45 p-4"><div className="text-2xl font-black">Future</div><div className="text-xs text-white/50">Revenue Tracking</div></div></div><div className="mt-4 space-y-3">{!searchedUsers.length && <p className="text-sm text-white/55">No Gmail accounts match the current search.</p>}{searchedUsers.map((u) => <div key={u.user_id} className="rounded-2xl bg-slate-900/45 p-4"><div className="flex flex-wrap items-center justify-between gap-3"><div><b>{u.full_name}</b><p className="text-xs text-white/50">{u.gmail_address} • Registered {new Date(u.registration_date).toLocaleDateString()} • Last login {u.last_login ? new Date(u.last_login).toLocaleString() : "Never"}</p></div><div className="flex flex-wrap gap-2"><Pill>{u.status}</Pill><button onClick={() => updateUserStatus(u.user_id, "Approved")} className="rounded-xl bg-emerald-400/20 px-3 py-2 text-xs font-bold text-emerald-100">Approve</button><button onClick={() => extendTrial(u.user_id)} className="rounded-xl bg-cyan-400/20 px-3 py-2 text-xs font-bold text-cyan-100">Extend Trial</button><button onClick={() => updateUserStatus(u.user_id, "Suspended")} className="rounded-xl bg-red-400/20 px-3 py-2 text-xs font-bold text-red-100">Suspend</button><button onClick={() => updateUserStatus(u.user_id, "Expired")} className="rounded-xl bg-white/10 px-3 py-2 text-xs font-bold">Revoke</button></div></div><div className="mt-3 grid gap-2 md:grid-cols-2">{(u.device_sessions || []).map((d) => <div key={d.id} className="rounded-xl bg-white/5 p-3 text-xs text-white/60">{d.device_info}<br />Last: {new Date(d.last_login).toLocaleString()}<br />Active: {d.active ? "Yes" : "No"}</div>)}</div><div className="mt-3 max-h-28 overflow-auto text-xs text-white/50">{(u.login_history || []).slice(0, 5).map((h) => <p key={h.id}>{new Date(h.created_at).toLocaleString()} • {h.device_info} • {h.action}</p>)}</div></div>)}</div></section>
       </div>
     </div>;
   };
@@ -1962,15 +2071,15 @@ export default function App() {
         <ShieldCheck className="mx-auto mb-4 h-12 w-12 text-emerald-200" />
         <h2 className="text-3xl font-black">Cloud Access Required</h2>
         {accessMessage && <div className="mx-auto mt-4 max-w-2xl rounded-2xl border border-amber-200/30 bg-amber-300/10 p-4 text-sm text-amber-100">{accessMessage}</div>}
-        <p className="mx-auto mt-3 max-w-2xl text-white/65">{profile?.status === "Expired" ? "Your trial access has ended. Please contact the administrator for full access." : profile?.status === "Suspended" ? "Your account is suspended. Please contact the administrator." : "Please sign in with Gmail. New users receive a 30-minute trial. Approved users receive unlimited access."}</p>
+        <p className="mx-auto mt-3 max-w-2xl text-white/65">{profile?.status === "Expired" ? "Your trial access has ended. Please contact the administrator for full access." : profile?.status === "Suspended" ? "Your account is suspended. Please contact the administrator." : "Please sign in with Gmail. New users receive a 60-minute trial. Approved users receive unlimited access."}</p>
         {profile?.status === "Expired" && (
           <div className="mx-auto mt-6 max-w-xl rounded-3xl border border-red-200/25 bg-slate-950/55 p-6 text-left">
             <h3 className="text-2xl font-black text-red-100">🚫 Trial Expired</h3>
             <p className="mt-2 text-white/70">Your free trial has ended.</p>
             <div className="mt-5 rounded-2xl border border-amber-200/25 bg-amber-300/10 p-5 text-center">
-              <p className="text-xs font-black uppercase tracking-widest text-amber-100">PROMO PRICE</p>
-              <p className="mt-1 text-4xl font-black text-white">₱180 ONLY</p>
-              <p className="mt-1 text-sm text-amber-100">First 100 Subscribers Only</p>
+              <p className="text-xs font-black uppercase tracking-widest text-amber-100">{remainingFoundingSlots ? "FOUNDING MEMBER OFFER" : "FOUNDING MEMBER OFFER CLOSED"}</p>
+              <p className="mt-1 text-4xl font-black text-white">PHP 250 Lifetime Access</p>
+              <p className="mt-1 text-sm text-amber-100">{foundingMembers.length} / {FOUNDING_MEMBER_LIMIT} claimed - {remainingFoundingSlots} slots remaining</p>
             </div>
             <div className="mt-5 space-y-2 text-sm text-white/75">
               <p className="font-black text-white">Unlock:</p>
@@ -1992,6 +2101,20 @@ export default function App() {
     </div>;
   };
 
+  const Tour = () => {
+    const steps = [
+      ["Welcome", "CSE Mastery is organized like a review center: learn first, test second, then simulate the real exam."],
+      ["Select Category", "Choose Verbal, Numerical, Analytical, or General Information from the dashboard selector."],
+      ["Select Topic", "Pick an exact topic such as Vocabulary, Percentages, Logic, or RA 6713."],
+      ["Open Learn Tab", "Read lessons, notes, strategies, tips, memory techniques, and practice examples."],
+      ["Take Mastery Test", "Use the Test tab when you are ready to measure topic mastery."],
+      ["View Performance Tracker", "Use the tracker and heat map to see weak areas and study activity."],
+      ["Start First Mock Exam", "Begin with Mock Exam 1 and unlock the next mock after passing the previous one."]
+    ];
+    const [title, body] = steps[tourStep] || steps[0];
+    return <AnimatePresence>{showTour && <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-50 grid place-items-center bg-slate-950/75 p-4 backdrop-blur-sm"><motion.div initial={{ y: 18, scale: .98 }} animate={{ y: 0, scale: 1 }} exit={{ y: 18, scale: .98 }} className="w-full max-w-xl rounded-[2rem] border border-white/10 bg-slate-900 p-6 shadow-2xl"><p className="text-sm font-bold text-emerald-200">Getting Started Guide</p><h3 className="mt-2 text-3xl font-black">{title}</h3><p className="mt-3 leading-7 text-white/70">{body}</p><div className="mt-5 h-2 rounded-full bg-white/10"><div className="h-full rounded-full bg-gradient-to-r from-emerald-300 to-cyan-300" style={{ width: `${((tourStep + 1) / steps.length) * 100}%` }} /></div><div className="mt-5 flex flex-wrap justify-between gap-3"><button onClick={completeTour} className="rounded-2xl border border-white/10 bg-white/10 px-5 py-3 font-bold">Skip</button><div className="flex gap-2"><button disabled={tourStep === 0} onClick={() => setTourStep((s) => Math.max(0, s - 1))} className="rounded-2xl border border-white/10 bg-white/10 px-5 py-3 font-bold disabled:opacity-40">Previous</button>{tourStep === steps.length - 1 ? <button onClick={completeTour} className="rounded-2xl bg-emerald-300 px-5 py-3 font-black text-slate-950">Finish</button> : <button onClick={() => setTourStep((s) => Math.min(steps.length - 1, s + 1))} className="rounded-2xl bg-white px-5 py-3 font-black text-slate-950">Next</button>}</div></div></motion.div></motion.div>}</AnimatePresence>;
+  };
+
   return (
     <div className="min-h-screen bg-[radial-gradient(circle_at_20%_10%,rgba(45,212,191,.22),transparent_30%),radial-gradient(circle_at_80%_0%,rgba(244,114,182,.16),transparent_28%),linear-gradient(135deg,#06131f,#101827_45%,#11130f)] text-white">
       <Header />
@@ -2004,9 +2127,11 @@ export default function App() {
       {!cloudLoading && hasAccess && screen === "learn" && <Learn />}
       {!cloudLoading && hasAccess && screen === "admin" && <Admin />}
       {screen === "account" && <Account />}
+      <Tour />
     </div>
   );
 }
+
 
 
 
