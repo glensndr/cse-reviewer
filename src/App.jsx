@@ -445,6 +445,29 @@ const COMMON_DISTRACTOR_POOL = [
   "uses a comparison with the wrong reference point"
 ];
 
+const WORD_DISTRACTOR_POOLS = {
+  Synonyms: ["careful", "fair", "brief", "clear", "accurate", "prompt", "open", "lawful", "proper", "reliable", "orderly", "reasonable", "consistent", "responsive", "complete", "neutral"],
+  Antonyms: ["reckless", "biased", "careless", "unclear", "wordy", "secretive", "delayed", "improper", "inaccurate", "unreliable", "inconsistent", "negligent", "irrelevant", "disorganized", "unfair", "obsolete"],
+  Vocabulary: ["prudent", "impartial", "meticulous", "concise", "transparent", "diligent", "coherent", "viable", "relevant", "accessible", "accurate", "formal", "courteous", "feasible", "ethical", "resilient"]
+};
+
+const isLexicalTopic = (category, subCategory) => category === "Verbal Ability" && ["Vocabulary", "Synonyms", "Antonyms"].includes(subCategory);
+
+function cleanQuestionText(text) {
+  let cleaned = String(text || "")
+    .replace(/^Item\s+[A-Z0-9-]+(?:-V\d+)*:\s*/i, "")
+    .replace(/^Variant\s+\d+:\s*/i, "")
+    .trim();
+  cleaned = cleaned.replace(/(?:In an? [a-z ]+ scenario,\s*){2,}/gi, (match) => {
+    const first = match.match(/In an? [a-z ]+ scenario,\s*/i)?.[0] || "";
+    return first;
+  });
+  for (let i = 0; i < 4; i++) {
+    cleaned = cleaned.replace(/^(In an? [a-z ]+ scenario,\s*)\1+/i, "$1");
+  }
+  return cleaned.trim();
+}
+
 function plausibleDistractors(category, subCategory, answer, id) {
   const categoryPool = DISTRACTOR_POOLS[category] || {};
   const pool = [
@@ -460,6 +483,13 @@ function plausibleDistractors(category, subCategory, answer, id) {
 
 function qualityChoices(choices, answer, category, subCategory, id) {
   const isNumerical = category === "Numerical Ability";
+  if (isLexicalTopic(category, subCategory)) {
+    const pool = WORD_DISTRACTOR_POOLS[subCategory] || WORD_DISTRACTOR_POOLS.Vocabulary;
+    const wordOnly = (choice) => /^[A-Za-z][A-Za-z-]{1,24}$/.test(String(choice));
+    const lexical = [...new Set([answer, ...choices.filter(wordOnly), ...seededShuffle(pool, `${id}-word-pool`)])]
+      .filter((choice) => choice && wordOnly(choice));
+    return [answer, ...seededShuffle(lexical.filter((choice) => choice !== answer), `${id}-lexical-trim`).slice(0, 3)];
+  }
   const clean = [...new Set([answer, ...choices])].filter(Boolean);
   const filtered = isNumerical ? clean : clean.filter((choice) => choice === answer || !OVERUSED_DISTRACTORS.has(String(choice).toLowerCase()));
   const result = [answer, ...filtered.filter((choice) => choice !== answer)];
@@ -528,7 +558,7 @@ function normalizeSubCategory(category, subCategory) {
 
 function makeQuestion({ id, category, subCategory, difficulty, question, choices, answer, explanation, hint, learningTip }) {
   subCategory = normalizeSubCategory(category, subCategory);
-  const backupChoices = [
+  const backupChoices = category === "Numerical Ability" ? numericVariantDistractors(answer, hashText(id) % 17 + 1) : [
     "The information given is insufficient",
     "A different rule or operation is required",
     "The statement reverses the required relationship",
@@ -545,26 +575,26 @@ function makeQuestion({ id, category, subCategory, difficulty, question, choices
       ? `Rule tested: ${subCategory}. Apply the public-service principle to the concrete government situation.`
       : "";
   const upgradedExplanation = rule ? `${rule} Why the correct answer is right: ${explanation} Why the other choices are wrong: they are either unrelated to the rule, too broad, contrary to the situation, or answer a different issue.` : explanation;
-  return { id, category, subCategory, difficulty, question: `Item ${id}: ${question}`, choices: arrangeChoices(cleanChoices.slice(0, 4), answer, id), answer, explanation: upgradedExplanation, hint, learningTip };
+  return { id, category, subCategory, difficulty, question: cleanQuestionText(question), choices: arrangeChoices(cleanChoices.slice(0, 4), answer, id), answer, explanation: upgradedExplanation, hint, learningTip };
 }
 
 function generateVerbal() {
   const vocab = [
-    ["prudent", "careful and wise", "reckless", "decorative", "temporary", "A prudent employee verifies records before submitting a public report."],
-    ["meticulous", "very careful and detailed", "careless", "silent", "ordinary", "Meticulous review prevents avoidable mistakes in official documents."],
-    ["impartial", "fair and unbiased", "partial", "angry", "uncertain", "An impartial officer treats all applicants under the same rule."],
-    ["concur", "to agree", "dispute", "delay", "inspect", "The committee members concurred after reviewing the evidence."],
-    ["relevant", "closely connected", "unrelated", "expensive", "hidden", "Relevant documents directly support the claim being assessed."],
-    ["diligent", "hardworking and persistent", "negligent", "wealthy", "brief", "A diligent clerk follows up pending requests promptly."],
-    ["concise", "brief but complete", "wordy", "confusing", "hostile", "A concise memorandum states the issue without unnecessary detail."],
-    ["obsolete", "no longer used", "current", "fragile", "popular", "Obsolete forms should be replaced by the latest approved version."],
-    ["ambiguous", "open to more than one meaning", "clear", "formal", "urgent", "Ambiguous instructions can lead to inconsistent implementation."],
-    ["resilient", "able to recover quickly", "fragile", "strict", "loud", "Resilient teams continue serving citizens during disruptions."],
-    ["scrutinize", "to examine closely", "ignore", "announce", "decorate", "Auditors scrutinize vouchers before approving payment."],
-    ["coherent", "logical and consistent", "disorganized", "beautiful", "brief", "A coherent report links findings to recommendations."],
-    ["viable", "workable or capable of success", "impossible", "official", "distant", "A viable solution can be implemented with available resources."],
-    ["exemplary", "worthy of imitation", "poor", "unusual", "private", "Exemplary conduct strengthens trust in public service."],
-    ["mitigate", "to lessen the severity", "worsen", "measure", "borrow", "Early planning helps mitigate the effects of flooding."]
+    ["prudent", "careful", "reckless", "decorative", "temporary", "A prudent employee verifies records before submitting a public report."],
+    ["meticulous", "thorough", "careless", "silent", "ordinary", "Meticulous review prevents avoidable mistakes in official documents."],
+    ["impartial", "fair", "biased", "angry", "uncertain", "An impartial officer treats all applicants under the same rule."],
+    ["concur", "agree", "dispute", "delay", "inspect", "The committee members concurred after reviewing the evidence."],
+    ["relevant", "connected", "unrelated", "expensive", "hidden", "Relevant documents directly support the claim being assessed."],
+    ["diligent", "hardworking", "negligent", "wealthy", "brief", "A diligent clerk follows up pending requests promptly."],
+    ["concise", "brief", "wordy", "confusing", "hostile", "A concise memorandum states the issue without unnecessary detail."],
+    ["obsolete", "outdated", "current", "fragile", "popular", "Obsolete forms should be replaced by the latest approved version."],
+    ["ambiguous", "unclear", "clear", "formal", "urgent", "Ambiguous instructions can lead to inconsistent implementation."],
+    ["resilient", "adaptable", "fragile", "strict", "loud", "Resilient teams continue serving citizens during disruptions."],
+    ["scrutinize", "examine", "ignore", "announce", "decorate", "Auditors scrutinize vouchers before approving payment."],
+    ["coherent", "logical", "disorganized", "beautiful", "brief", "A coherent report links findings to recommendations."],
+    ["viable", "workable", "impossible", "official", "distant", "A viable solution can be implemented with available resources."],
+    ["exemplary", "excellent", "poor", "unusual", "private", "Exemplary conduct strengthens trust in public service."],
+    ["mitigate", "lessen", "worsen", "measure", "borrow", "Early planning helps mitigate the effects of flooding."]
   ];
   const usage = [
     ["The director approved the proposal after a thorough ____ of its budget impact.", "review", ["receipt", "review", "rumor", "repair"], "The sentence needs a noun meaning careful examination."],
@@ -667,9 +697,15 @@ function generateVerbal() {
       const v = vocab[mod(i, vocab.length)];
       const askSyn = i % 10 !== 5;
       const answer = askSyn ? v[1] : v[2];
+      const lexicalTopic = askSyn ? (i % 4 === 0 ? "Vocabulary" : "Synonyms") : "Antonyms";
+      const lexicalPrompt = lexicalTopic === "Vocabulary"
+        ? `In the sentence "${v[5]}" what does "${v[0]}" mean?`
+        : lexicalTopic === "Synonyms"
+          ? `Which word is closest in meaning to "${v[0]}" as used in this sentence: "${v[5]}"?`
+          : `Which word is opposite in meaning to "${v[0]}" as used in this sentence: "${v[5]}"?`;
       questions.push(makeQuestion({
-        id: uid("VA", i), category: "Verbal Ability", subCategory: askSyn ? (i % 4 === 0 ? "Vocabulary" : "Synonyms") : "Antonyms", difficulty: d,
-        question: `In the sentence "${v[5]}" what is the ${askSyn ? "closest meaning" : "opposite"} of "${v[0]}"?`,
+        id: uid("VA", i), category: "Verbal Ability", subCategory: lexicalTopic, difficulty: d,
+        question: lexicalPrompt,
         choices: askSyn ? [v[1], v[2], v[3], v[4]] : [v[2], v[1], v[3], v[4]],
         answer,
         explanation: `"${v[0]}" means ${v[1]}. In civil service items, use the context of the sentence before choosing a dictionary meaning. ${askSyn ? `Thus the closest meaning is "${v[1]}."` : `The opposite idea is "${v[2]}."`}`,
@@ -1007,7 +1043,17 @@ function generateSupplementalCoverage() {
     ["The rules should be applied in a ____ manner to all applicants.", "consistent", ["consistent", "confusing", "careless", "costly"]],
     ["The new portal made frontline services more ____ to citizens.", "accessible", ["accessible", "accidental", "aggressive", "artificial"]]
   ];
-  const vocabWords = [["diligent", "hardworking"], ["prudent", "careful"], ["transparent", "open"], ["accountable", "answerable"], ["meticulous", "detail-oriented"], ["resilient", "able to recover"], ["obsolete", "outdated"], ["coherent", "logical"], ["relevant", "connected"], ["ethical", "morally proper"]];
+  const vocabWords = [["diligent", "hardworking", "negligent", "persistent", "attentive"], ["prudent", "careful", "reckless", "wise", "cautious"], ["transparent", "open", "secretive", "clear", "visible"], ["accountable", "answerable", "unaccountable", "responsible", "liable"], ["meticulous", "precise", "careless", "thorough", "detailed"], ["resilient", "adaptable", "fragile", "steady", "strong"], ["obsolete", "outdated", "current", "old", "unused"], ["coherent", "logical", "confusing", "organized", "consistent"], ["relevant", "connected", "irrelevant", "related", "applicable"], ["ethical", "honest", "improper", "moral", "principled"]];
+  const currentEventItems = [
+    ["A national agency issues an official advisory during a public health concern. Which source should a citizen rely on first?", "the official government advisory", ["viral reposts without source", "anonymous group chats", "unverified commentary"], "Current-events awareness requires checking official and verifiable public information."],
+    ["A typhoon affects several provinces and local governments activate evacuation centers. Which issue is most directly involved?", "disaster risk reduction and public safety", ["private entertainment policy", "foreign currency trading only", "sports regulation"], "Major disaster response is a recurring civic-awareness and public-service current event topic."],
+    ["The government launches an online service portal for faster transactions. Which public-service concern does this address?", "digitalization of government services", ["abolition of due process", "private ownership of public records", "removal of citizen feedback"], "Government digitalization is a national development issue tied to frontline service."],
+    ["A transport modernization update is reported by official agencies. What should examinees focus on?", "public impact, implementation, and affected sectors", ["celebrity opinion only", "rumors about unrelated offices", "the longest social media thread"], "Current-events questions test civic impact, not gossip or unsupported claims."],
+    ["A new government program targets food security and local agriculture. Which national issue is most related?", "food supply and economic resilience", ["grammar correction", "office furniture layout", "private party preference"], "Food security is a national development and public welfare issue."],
+    ["A cybersecurity warning is released after reports of online scams. Which public concern is highlighted?", "digital safety and citizen protection", ["manual filing style", "road width measurement", "literary tone"], "Cybersecurity has become a significant public-service and citizen-awareness issue."],
+    ["A Senate or House hearing is covered in national news. Which concept helps citizens understand its purpose?", "legislative oversight and inquiry", ["judicial sentencing by reporters", "private bidding without rules", "weather forecasting"], "Government proceedings are current events when they affect policy, accountability, or public funds."],
+    ["An inflation update is released by the statistics authority. What is the best civic interpretation?", "it indicates changes in prices affecting households", ["it is a grammar rule", "it proves all agencies are private", "it replaces the Constitution"], "Economic indicators are current-events topics because they affect citizens and government planning."]
+  ];
   const questions = [];
   const push = (category, subCategory, i, question, choices, answer, explanation, hint = "Eliminate choices that do not match the rule or facts.") => {
     questions.push(makeQuestion({
@@ -1032,9 +1078,10 @@ function generateSupplementalCoverage() {
             const item = completion[i % completion.length];
             push(cat.name, topic, i, `${item[0]} (${office})`, item[2], item[1], `The sentence needs "${item[1]}" because it fits both the meaning and formal tone.`);
           } else if (topic === "Vocabulary" || topic === "Synonyms" || topic === "Antonyms") {
-            const [word, meaning] = vocabWords[i % vocabWords.length];
-            const answer = topic === "Antonyms" ? `not ${meaning}` : meaning;
-            push(cat.name, topic, i, `In a ${office} report, what is the best ${topic === "Antonyms" ? "opposite" : "meaning"} of "${word}"?`, [answer, "unrelated to the report", "done without care", "limited to private use"], answer, `"${word}" is used in formal reviewer contexts to mean ${meaning}.`);
+            const [word, meaning, antonym, nearOne, nearTwo] = vocabWords[i % vocabWords.length];
+            const answer = topic === "Antonyms" ? antonym : meaning;
+            const prompt = topic === "Antonyms" ? `What is the best antonym of "${word}" in formal usage?` : topic === "Synonyms" ? `Which synonym best matches "${word}" in a ${office} report?` : `In a ${office} report, what is the best meaning of "${word}"?`;
+            push(cat.name, topic, i, prompt, [answer, nearOne, nearTwo, topic === "Antonyms" ? meaning : antonym], answer, `"${word}" is used in formal reviewer contexts to mean ${meaning}.`);
           } else if (topic === "Grammar and Correct Usage") {
             const subject = ["list", "committee", "employee", "set of forms", "schedule"][i % 5];
             const answer = `The ${subject} is ready for release.`;
@@ -1090,6 +1137,9 @@ function generateSupplementalCoverage() {
             const answer = "It follows only if the stated premise guarantees it.";
             push(cat.name, topic, i, `All approved vouchers have complete documents. One voucher lacks complete documents. What reasoning rule applies?`, [answer, "Reverse the premise automatically.", "Assume it is approved because it is a voucher.", "Ignore the condition stated."], answer, "Logic items require checking whether a conclusion is guaranteed by the premise.");
           }
+        } else if (topic === "Current Events") {
+          const item = currentEventItems[i % currentEventItems.length];
+          push(cat.name, topic, i, item[0], [item[1], ...item[2]], item[1], item[3], "Choose the option tied to verified national issues, government action, or public-service impact.");
         } else {
           const answer = topic === "Government Structure" ? "separation of powers" : topic === "Current Events" ? "evidence-based public response" : topic;
           push(cat.name, topic, i, `A ${office} situation requires applying ${topic}. Which principle is most relevant?`, [answer, "private advantage over public duty", "unverified rumor as policy basis", "arbitrary treatment without standards"], answer, `${topic} questions test practical application of public-service rules and civic values.`);
@@ -1159,14 +1209,21 @@ function normalizeDbQuestion(row) {
 
 function variantQuestion(base, variantIndex) {
   const contexts = ["records audit", "frontline service", "permit processing", "budget review", "community program", "procurement check", "citizen complaint", "HR screening", "environmental report", "public assistance"];
+  const focuses = ["official records", "citizen documents", "agency guidelines", "service standards", "review findings", "frontline procedures", "public advisories", "compliance checks", "community reports", "office transactions", "case notes", "program updates"];
+  const details = ["before final release", "after supervisor review", "during compliance checking", "while preparing a summary", "after comparing supporting files", "during a public-service evaluation", "before encoding the result", "while resolving a citizen concern", "after checking the official basis", "during quality review", "while preparing the recommendation", "after validating the submitted details", "during a follow-up review", "before forwarding the action", "while checking the official record", "after identifying the main issue"];
+  const angles = ["for a routine request", "for an urgent request", "for a first-time applicant", "for a returning client", "for a multi-office transaction", "for an incomplete submission", "for a verified complaint", "for a documented appeal", "for a community inquiry", "for an internal review", "for a policy update", "for a service-delay report", "for a citizen feedback form", "for an audit observation", "for a public advisory", "for a digital filing concern", "for a records correction", "for a compliance reminder", "for a frontline service report"];
   const context = contexts[variantIndex % contexts.length];
+  const focus = focuses[variantIndex % focuses.length];
+  const detail = details[variantIndex % details.length];
+  const angle = angles[variantIndex % angles.length];
   const difficulty = DIFFICULTIES[(DIFFICULTIES.indexOf(base.difficulty) + variantIndex) % DIFFICULTIES.length] || base.difficulty;
   const variantId = `${base.id}-V${variantIndex}`;
+  const baseText = cleanQuestionText(base.question).replace(/^In an? [a-z ]+ scenario,\s*/i, "");
   return makeQuestion({
     ...base,
     id: variantId,
     difficulty,
-    question: `Variant ${variantIndex}: In a ${context} scenario, ${base.question.replace(/^Item\s+[A-Z0-9-]+:\s*/i, "").replace(/^Variant\s+\d+:\s*/i, "")}`,
+    question: `In a ${context} scenario involving ${focus} ${detail} ${angle}, ${baseText}`,
     choices: base.category === "Numerical Ability" ? [base.answer, ...numericVariantDistractors(base.answer, variantIndex)] : [base.answer, ...plausibleDistractors(base.category, base.subCategory, base.answer, variantId).slice(0, 5)],
     answer: base.answer,
     explanation: `${base.explanation} This variation uses a different ${context} context, but the same tested concept applies.`,
@@ -1176,7 +1233,16 @@ function variantQuestion(base, variantIndex) {
 }
 
 function expandQuestionPool(bank, minimumPerSub = 360) {
-  const expanded = [...bank];
+  const uniqueBank = [];
+  const initialSeen = new Set();
+  bank.forEach((q) => {
+    const key = `${q.category}|${q.subCategory}|${questionSignature(q)}`;
+    if (!initialSeen.has(key)) {
+      uniqueBank.push(q);
+      initialSeen.add(key);
+    }
+  });
+  const expanded = [...uniqueBank];
   const grouped = {};
   expanded.forEach((q) => {
     const key = `${q.category}|${q.subCategory}`;
@@ -1184,13 +1250,20 @@ function expandQuestionPool(bank, minimumPerSub = 360) {
   });
   CATEGORIES.forEach((cat) => cat.subs.forEach((sub) => {
     const key = `${cat.name}|${sub}`;
-    const source = grouped[key] || [];
+    const source = [...(grouped[key] || [])];
     let variantIndex = 1;
-    while (source.length && (grouped[key]?.length || 0) < minimumPerSub) {
+    const seenQuestions = new Set((grouped[key] || []).map(questionSignature));
+    let attempts = 0;
+    while (source.length && seenQuestions.size < minimumPerSub && attempts < minimumPerSub * 30) {
       const next = variantQuestion(source[(variantIndex - 1) % source.length], variantIndex);
-      expanded.push(next);
-      (grouped[key] ||= []).push(next);
+      const nextSignature = questionSignature(next);
+      if (!seenQuestions.has(nextSignature)) {
+        expanded.push(next);
+        (grouped[key] ||= []).push(next);
+        seenQuestions.add(nextSignature);
+      }
       variantIndex += 1;
+      attempts += 1;
     }
   }));
   return expanded;
