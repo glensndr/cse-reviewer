@@ -1559,6 +1559,161 @@ function extractActualReviewerQuestions(text, importItem) {
   });
 }
 
+const REVIEWER_SECTIONS = [
+  ["READING COMPREHENSION", "Verbal Ability", "Reading Comprehension"],
+  ["PARAGRAPH ORGANIZATION", "Verbal Ability", "Paragraph Organization"],
+  ["SENTENCE COMPLETION", "Verbal Ability", "Sentence Completion"],
+  ["VERBAL REASONING", "Verbal Ability", "Verbal Reasoning"],
+  ["CORRECT USAGE", "Verbal Ability", "Grammar and Correct Usage"],
+  ["GRAMMAR", "Verbal Ability", "Grammar and Correct Usage"],
+  ["SYNONYMS", "Verbal Ability", "Synonyms"],
+  ["ANTONYMS", "Verbal Ability", "Antonyms"],
+  ["VOCABULARY", "Verbal Ability", "Vocabulary"],
+  ["WORD ANALOGY", "Analytical Ability", "Analogy"],
+  ["ANALOGY", "Analytical Ability", "Analogy"],
+  ["LOGICAL REASONING", "Analytical Ability", "Logic"],
+  ["LOGIC", "Analytical Ability", "Logic"],
+  ["ASSUMPTIONS", "Analytical Ability", "Assumptions"],
+  ["CONCLUSIONS", "Analytical Ability", "Conclusions"],
+  ["WORD ASSOCIATION", "Analytical Ability", "Word Association"],
+  ["DATA INTERPRETATION", "Analytical Ability", "Data Interpretation"],
+  ["PATTERN RECOGNITION", "Analytical Ability", "Pattern Recognition"],
+  ["CRITICAL THINKING", "Analytical Ability", "Critical Thinking"],
+  ["NUMERICAL REASONING", "Numerical Ability", "Basic Operations"],
+  ["WORD PROBLEMS", "Numerical Ability", "Word Problems"],
+  ["NUMBER SERIES", "Numerical Ability", "Number Series"],
+  ["PERCENTAGES", "Numerical Ability", "Percentages"],
+  ["PERCENTAGE", "Numerical Ability", "Percentages"],
+  ["RATIO", "Numerical Ability", "Ratios and Proportions"],
+  ["FRACTIONS", "Numerical Ability", "Fractions"],
+  ["DECIMALS", "Numerical Ability", "Decimals"],
+  ["INTEREST", "Numerical Ability", "Simple Interest"],
+  ["CONSTITUTION", "General Information", "Philippine Constitution"],
+  ["RA 6713", "General Information", "RA 6713"],
+  ["REPUBLIC ACT NO. 6713", "General Information", "RA 6713"],
+  ["GENERAL INFORMATION", "General Information", "Public Service Values"],
+  ["CURRENT EVENTS", "General Information", "Current Events"],
+  ["GOVERNMENT", "General Information", "Government Structure"],
+  ["HUMAN RIGHTS", "General Information", "Human Rights"],
+  ["ENVIRONMENTAL", "General Information", "Environmental Management"]
+];
+
+function detectReviewerSection(line) {
+  const normalized = line.toUpperCase().replace(/[^A-Z0-9 ]+/g, " ").replace(/\s+/g, " ").trim();
+  if (!normalized || normalized.length > 90) return null;
+  const match = REVIEWER_SECTIONS.find(([heading]) => normalized === heading || normalized.includes(heading));
+  return match ? { heading: match[0], category: match[1], subCategory: match[2] } : null;
+}
+
+function classifyReviewerQuestion(text, fallbackItem) {
+  const section = detectReviewerSection(text);
+  if (section) return section;
+  const category = categorizeText(`${fallbackItem.name} ${text}`);
+  const topic = extractTopics(`${fallbackItem.name} ${text}`)[0] || (fallbackItem.topics || [])[0] || "Reviewer Questions";
+  return { heading: "Keyword Classification", category, subCategory: normalizeSubCategory(category, topic) };
+}
+
+function normalizeReviewerText(text) {
+  return text
+    .replace(/\r/g, "\n")
+    .replace(/[ \t]+/g, " ")
+    .replace(/([^\n])\s+((?:Q\s*)?\d{1,3})\s*[\.\)]\s+/gi, "$1\n$2. ")
+    .replace(/([^\n])\s+([A-Da-d])\s*[\.\)]\s+/g, "$1\n$2. ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function extractAnswerKeyMap(text) {
+  const keyMap = {};
+  const keyMatch = text.match(/(?:ANSWER\s*KEY|ANSWERS?|KEY\s*TO\s*CORRECTION)([\s\S]*)$/i);
+  if (!keyMatch) return keyMap;
+  const keyText = keyMatch[1].slice(0, 8000);
+  for (const match of keyText.matchAll(/(?:^|\s)(\d{1,3})\s*(?:[\.\)\-:]\s*)?([A-D])\b/gi)) {
+    keyMap[Number(match[1])] = match[2].toUpperCase();
+  }
+  return keyMap;
+}
+
+function trimAnswerKeyText(text) {
+  return text.replace(/(?:ANSWER\s*KEY|ANSWERS?|KEY\s*TO\s*CORRECTION)[\s\S]*$/i, "").trim();
+}
+
+function questionNumberFromToken(token) {
+  const match = String(token).match(/\d{1,3}/);
+  return match ? Number(match[0]) : null;
+}
+
+function extractActualReviewerQuestionsV2(text, importItem) {
+  const normalized = normalizeReviewerText(text);
+  const emptyStats = { extractedTextLength: normalized.length, questionsDetected: 0, questionsWithChoices: 0, questionsWithAnswerKeys: 0, questionsWithoutAnswerKeys: 0, sectionsDetected: [] };
+  if (!normalized) {
+    const empty = [];
+    empty.parseStats = emptyStats;
+    return empty;
+  }
+  const answerKey = extractAnswerKeyMap(normalized);
+  const bodyText = trimAnswerKeyText(normalized);
+  const starts = [...bodyText.matchAll(/(?:^|\n)\s*((?:Q\s*)?\d{1,3})\s*[\.\)]\s+/gi)];
+  const questions = [];
+  const detectedSections = [];
+  let currentSection = null;
+  bodyText.split("\n").forEach((line) => {
+    const section = detectReviewerSection(line);
+    if (section && !detectedSections.some((item) => item.heading === section.heading)) detectedSections.push(section);
+  });
+  starts.forEach((start, index) => {
+    const blockStart = start.index || 0;
+    const blockEnd = starts[index + 1]?.index ?? bodyText.length;
+    const headingText = bodyText.slice(Math.max(0, bodyText.lastIndexOf("\n", blockStart - 2) - 140), blockStart);
+    headingText.split("\n").forEach((line) => {
+      const section = detectReviewerSection(line);
+      if (section) currentSection = section;
+    });
+    const block = bodyText.slice(blockStart, blockEnd).trim();
+    const choiceMatches = [...block.matchAll(/(?:^|\n)\s*([A-Da-d])\s*[\.\)]\s*([\s\S]*?)(?=\n\s*[A-Da-d]\s*[\.\)]\s+|$)/g)];
+    if (choiceMatches.length < 4) return;
+    const firstChoiceAt = choiceMatches[0].index ?? block.search(/\n\s*A[\.\)]\s+/i);
+    const questionNumber = questionNumberFromToken(start[1]);
+    const stem = block.slice(0, firstChoiceAt).replace(/^\s*(?:Q\s*)?\d{1,3}[\.\)]\s*/, "").trim();
+    if (!stem || stem.length < 12) return;
+    const choices = choiceMatches.slice(0, 4).map((match) => match[2].replace(/\n+/g, " ").replace(/[✓✔*]\s*$/g, "").trim());
+    const keyLetter = questionNumber ? answerKey[questionNumber] : "";
+    const answer = keyLetter ? choices["ABCD".indexOf(keyLetter)] || "" : "";
+    const mapped = currentSection || classifyReviewerQuestion(`${stem} ${choices.join(" ")}`, importItem);
+    questions.push({
+      id: `IMP-${importItem.id}-Q${String(questionNumber || index + 1).padStart(4, "0")}`,
+      category: mapped.category,
+      subCategory: normalizeSubCategory(mapped.category, mapped.subCategory),
+      difficulty: DIFFICULTIES[index % DIFFICULTIES.length],
+      question: stem,
+      choices,
+      answer,
+      explanation: answer ? `Imported directly from ${importItem.name}. The answer key marks ${keyLetter}.` : `Imported directly from ${importItem.name}. No answer key was detected for this item; review before approval.`,
+      hint: "Use the exact reviewer item and eliminate choices using the tested concept.",
+      learningTip: "Re-answer the original reviewer item until you can explain why the keyed answer is correct.",
+      sourceSection: mapped.heading,
+      questionNumber,
+      missingAnswer: !answer
+    });
+  });
+  const seen = new Set();
+  const unique = questions.filter((q) => {
+    const key = `${q.question.toLowerCase()}|${q.choices.join("|").toLowerCase()}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  unique.parseStats = {
+    extractedTextLength: normalized.length,
+    questionsDetected: starts.length,
+    questionsWithChoices: unique.length,
+    questionsWithAnswerKeys: unique.filter((q) => q.answer).length,
+    questionsWithoutAnswerKeys: unique.filter((q) => !q.answer).length,
+    sectionsDetected: detectedSections
+  };
+  return unique;
+}
+
 function toQuestionBankRow(q, meta = {}) {
   return {
     id: q.id,
@@ -2250,7 +2405,7 @@ export default function App() {
     }
     const rows = questions.map((q) => toQuestionBankRow(q, {
       source: "Imported",
-      status: "Approved",
+      status: q.answer ? "Approved" : "Pending Review",
       approvedBy,
       tags: ["imported-reviewer", importItem.name, q.category, q.subCategory]
     }));
@@ -2421,11 +2576,13 @@ export default function App() {
           rawTextPreview: text.slice(0, 12000),
           importedAt: new Date().toISOString()
         };
-        const extractedQuestions = extractActualReviewerQuestions(text, draftItem);
+        const extractedQuestions = extractActualReviewerQuestionsV2(text, draftItem);
+        const parseStats = extractedQuestions.parseStats || {};
         imported.push({
           ...draftItem,
           extractedQuestions,
           detectedQuestionCount: extractedQuestions.length,
+          parseStats,
           importStatus: extraction.error ? "Extraction Error" : extractedQuestions.length ? "Questions Detected" : "No Questions Detected"
         });
       }
@@ -2850,12 +3007,37 @@ export default function App() {
             {!(progress.imports || []).length && <p className="text-sm text-white/55">No uploaded files yet. Your local reviewer ZIPs are cataloged above; upload PDFs/DOCX/TXT here to expand the active bank.</p>}
             {(progress.imports || []).map((item) => {
               const detectedCount = item.detectedQuestionCount || item.extractedQuestions?.length || 0;
+              const stats = item.parseStats || {};
+              const sectionCounts = (item.extractedQuestions || []).reduce((acc, q) => {
+                const key = q.subCategory || "Unclassified";
+                acc[key] = (acc[key] || 0) + 1;
+                return acc;
+              }, {});
               return <div key={item.id} className="rounded-2xl bg-slate-900/45 p-4">
                 <div className="flex justify-between gap-3"><b>{item.name}</b><Pill>{item.category}</Pill></div>
                 <p className="mt-2 text-xs text-white/50">{(item.topics || []).length ? item.topics.join(", ") : "General concepts detected"} - {detectedCount} actual questions detected</p>
                 <p className="mt-2 text-xs text-white/50">Extraction: {item.extractionMethod || "Legacy import metadata only"}{item.extractionPages ? ` - Pages read: ${item.extractionPages}` : ""}</p>
                 {item.extractionError && <p className="mt-2 rounded-xl border border-red-200/20 bg-red-400/10 p-2 text-xs text-red-100">{item.extractionError}</p>}
+                <div className="mt-3 grid gap-2 text-xs text-white/60 sm:grid-cols-3">
+                  <span className="rounded-xl bg-white/5 p-2">Text length: {stats.extractedTextLength || item.rawTextPreview?.length || 0}</span>
+                  <span className="rounded-xl bg-white/5 p-2">Numbered items: {stats.questionsDetected || 0}</span>
+                  <span className="rounded-xl bg-white/5 p-2">With choices: {stats.questionsWithChoices || detectedCount}</span>
+                  <span className="rounded-xl bg-white/5 p-2">With answers: {stats.questionsWithAnswerKeys || 0}</span>
+                  <span className="rounded-xl bg-white/5 p-2">Missing answers: {stats.questionsWithoutAnswerKeys || 0}</span>
+                  <span className="rounded-xl bg-white/5 p-2">Sections: {(stats.sectionsDetected || []).length}</span>
+                </div>
+                {!!Object.keys(sectionCounts).length && <div className="mt-3 flex flex-wrap gap-2">{Object.entries(sectionCounts).map(([name, count]) => <Pill key={name}>{name}: {count}</Pill>)}</div>}
                 <div className="mt-3 text-xs text-white/55">{(item.concepts || []).slice(0, 3).map((c) => <p key={c}>- {c}</p>)}</div>
+                {!!(item.extractedQuestions || []).length && <details className="mt-3 rounded-xl bg-slate-950/55 p-3 text-xs text-white/60">
+                  <summary className="cursor-pointer font-bold text-white/80">Preview first 10 parsed questions</summary>
+                  <div className="mt-3 max-h-80 space-y-3 overflow-auto">
+                    {(item.extractedQuestions || []).slice(0, 10).map((q) => <div key={q.id} className="rounded-xl bg-white/5 p-3">
+                      <p className="font-bold text-white/80">{q.questionNumber ? `${q.questionNumber}. ` : ""}{q.question}</p>
+                      <p className="mt-1 text-white/45">{q.category} - {q.subCategory} - {q.answer ? "Approved" : "Pending Review"}</p>
+                      <div className="mt-2 grid gap-1 sm:grid-cols-2">{q.choices.map((choice, idx) => <span key={`${q.id}-${choice}`} className="rounded-lg bg-slate-900/70 p-2">{choiceLetters[idx]}. {choice}</span>)}</div>
+                    </div>)}
+                  </div>
+                </details>}
                 <details className="mt-3 rounded-xl bg-slate-950/55 p-3 text-xs text-white/60">
                   <summary className="cursor-pointer font-bold text-white/80">Show raw extracted text</summary>
                   <pre className="mt-3 max-h-64 overflow-auto whitespace-pre-wrap leading-5">{item.rawTextPreview || "Raw extracted text was not saved for this legacy import. Re-upload the file to inspect extraction output."}</pre>
