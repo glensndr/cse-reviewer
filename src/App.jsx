@@ -36,6 +36,8 @@ const TRIAL_MINUTES = 60;
 const MAX_ACTIVE_DEVICES = 2;
 const MOCK_EXAM_MODES = Array.from({ length: 10 }, (_, i) => `Mock Exam ${i + 1}`);
 const FOUNDING_MEMBER_LIMIT = 30;
+const QUESTION_BANK_SELECT_WITH_STATUS = "id,category,sub_category,difficulty,question,choices,answer,explanation,hint,learning_tip,source,status";
+const QUESTION_BANK_SELECT_CORE = "id,category,sub_category,difficulty,question,choices,answer,explanation,hint,learning_tip,source";
 
 const CATEGORIES = [
   {
@@ -1301,7 +1303,7 @@ function analyze(progress, bank = QUESTION_BANK) {
 }
 
 function buildQuestionBank(progress, cloudRows = []) {
-  const cloudQuestions = (cloudRows || []).filter((row) => !row.status || row.status === "Approved").map(normalizeDbQuestion).filter(Boolean);
+  const cloudQuestions = (cloudRows || []).filter((row) => !row.status || String(row.status).toLowerCase() === "approved").map(normalizeDbQuestion).filter(Boolean);
   return [...QUESTION_BANK, ...cloudQuestions];
 }
 
@@ -1829,7 +1831,8 @@ export default function App() {
   const cloudRefreshInFlightRef = useRef(false);
   const loadedSessionKeyRef = useRef("");
   const profileLoadedRef = useRef(false);
-  const allQuestions = useMemo(() => expandQuestionPool(buildQuestionBank(progress, cloudQuestionRows), 360), [cloudQuestionRows]);
+  const baseQuestions = useMemo(() => buildQuestionBank(progress, cloudQuestionRows), [cloudQuestionRows]);
+  const allQuestions = useMemo(() => expandQuestionPool(baseQuestions, 360), [baseQuestions]);
   const stats = useMemo(() => analyze(progress, allQuestions), [progress, allQuestions]);
   const readiness = useMemo(() => {
     const mockCompleted = progress.sessions.filter((s) => s.mode?.includes("Mock") || s.mode === "Full Mock Exam").length;
@@ -1857,10 +1860,34 @@ export default function App() {
     console.warn(`[CSE Supabase] ${label}`, error);
   }
 
+  async function loadQuestionBankRows() {
+    if (!supabase) return [];
+    let result = await supabase
+      .from("question_bank")
+      .select(QUESTION_BANK_SELECT_WITH_STATUS)
+      .in("status", ["Approved", "approved"])
+      .limit(5000);
+    if (result.error || !(result.data || []).length) {
+      setSupabaseError("question bank status-filtered fetch failed", result.error);
+      result = await supabase
+        .from("question_bank")
+        .select(QUESTION_BANK_SELECT_CORE)
+        .limit(5000);
+    }
+    setSupabaseError("question bank core fetch failed", result.error);
+    const rows = result.data || [];
+    setCloudQuestionRows(rows);
+    return rows;
+  }
+
   useEffect(() => {
     const topics = CATEGORIES.find((cat) => cat.name === aiStudioCategory)?.subs || [];
     if (topics.length && !topics.includes(aiStudioTopic)) setAiStudioTopic(topics[0]);
   }, [aiStudioCategory, aiStudioTopic]);
+
+  useEffect(() => {
+    if (supabaseConfigured) loadQuestionBankRows();
+  }, []);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -1935,18 +1962,17 @@ export default function App() {
     try {
       await ensureCloudProfile(session);
       const userId = session.user.id;
-      const [profileResult, progressResult, historyResult, deviceResult, questionBankResult] = await Promise.all([
+      const [profileResult, progressResult, historyResult, deviceResult, questionRows] = await Promise.all([
         supabase.from("user_profiles").select("*").eq("user_id", userId).single(),
         supabase.from("user_progress").select("app_state").eq("user_id", userId).single(),
         supabase.from("login_history").select("*").eq("user_id", userId).order("created_at", { ascending: false }).limit(30),
         supabase.from("device_sessions").select("*").eq("user_id", userId).order("last_login", { ascending: false }),
-        supabase.from("question_bank").select("*").limit(5000)
+        loadQuestionBankRows()
       ]);
       setSupabaseError("profile fetch failed", profileResult.error);
       setSupabaseError("progress fetch failed", progressResult.error);
       setSupabaseError("login history fetch failed", historyResult.error);
       setSupabaseError("device sessions fetch failed", deviceResult.error);
-      setSupabaseError("question bank fetch failed", questionBankResult.error);
       const profileRow = profileResult.data;
       const progressRow = progressResult.data;
       const historyRows = historyResult.data;
@@ -1958,7 +1984,7 @@ export default function App() {
       if (progressRow?.app_state && Object.keys(progressRow.app_state).length) setProgress({ ...initialProgress, ...progressRow.app_state });
       setLoginHistory(historyRows || []);
       setDeviceSessions(deviceRows || []);
-      setCloudQuestionRows(questionBankResult.data || []);
+      setCloudQuestionRows(questionRows || []);
       await registerDeviceSession(userId);
       if (profileRow?.role === "Admin") await loadAdminUsers();
       loadedSessionKeyRef.current = sessionKey;
@@ -2226,10 +2252,7 @@ export default function App() {
         }
         savedRows = [...savedRows, ...(result.data || batch)];
       }
-      setCloudQuestionRows((currentRows) => {
-        const publishedIds = new Set(savedRows.map((row) => row.id));
-        return [...savedRows, ...currentRows.filter((row) => !publishedIds.has(row.id))];
-      });
+      await loadQuestionBankRows();
       setProgress((p) => ({
         ...p,
         imports: (p.imports || []).map((item) => item.id === importItem.id ? {
@@ -2721,8 +2744,9 @@ export default function App() {
   };
 
   const Admin = () => {
-    const bankStats = CATEGORIES.map((cat) => ({ name: cat.name, count: allQuestions.filter((q) => q.category === cat.name).length }));
-    const topicStats = CATEGORIES.flatMap((cat) => cat.subs.map((sub) => ({ category: cat.short, name: sub, count: allQuestions.filter((q) => q.category === cat.name && q.subCategory === sub).length })));
+    const bankStats = CATEGORIES.map((cat) => ({ name: cat.name, count: baseQuestions.filter((q) => q.category === cat.name).length }));
+    const topicStats = CATEGORIES.flatMap((cat) => cat.subs.map((sub) => ({ category: cat.short, name: sub, count: baseQuestions.filter((q) => q.category === cat.name && q.subCategory === sub).length })));
+    const difficultyStats = DIFFICULTIES.map((difficulty) => ({ name: difficulty, count: baseQuestions.filter((q) => q.difficulty === difficulty).length }));
     const searchedUsers = cloudUsers.filter((user) => `${user.full_name} ${user.gmail_address} ${user.status}`.toLowerCase().includes(adminSearch.toLowerCase()));
     const pendingUsers = searchedUsers.filter((user) => ["Trial Pending", "Trial Active"].includes(user.status));
     const aiDrafts = progress.aiDrafts || [];
@@ -2733,7 +2757,8 @@ export default function App() {
     return <div className="mx-auto max-w-7xl px-4 py-8">
       <div className="rounded-[2rem] border border-white/10 bg-white/[.08] p-6 backdrop-blur-xl">
         <div className="flex flex-wrap items-start justify-between gap-4"><div><p className="text-emerald-200">Reviewer Import System</p><h2 className="text-3xl font-black">Admin Import Module</h2><p className="mt-2 max-w-3xl text-sm text-white/60">Upload PDF, DOCX, or TXT reviewers. The app extracts text where available, detects category/topics, builds lessons/concepts, generates practice variations, and syncs imported reviewer metadata through Supabase progress storage.</p></div><label className="inline-flex min-h-12 cursor-pointer items-center gap-2 rounded-2xl bg-white px-5 font-black text-slate-950"><Upload className="h-4 w-4" />{importBusy ? "Analyzing..." : "Upload Reviewers"}<input type="file" multiple accept=".pdf,.docx,.txt" className="hidden" onChange={(e) => importReviewers(e.target.files)} /></label></div>
-        <div className="mt-6 grid gap-3 md:grid-cols-5"><div className="rounded-2xl bg-slate-900/55 p-4"><div className="text-2xl font-black">{allQuestions.length}</div><div className="text-xs text-white/50">Total Questions</div></div>{bankStats.map((s) => <div key={s.name} className="rounded-2xl bg-slate-900/55 p-4"><div className="text-2xl font-black">{s.count}</div><div className="text-xs text-white/50">{s.name}</div></div>)}</div>
+        <div className="mt-6 grid gap-3 md:grid-cols-5"><div className="rounded-2xl bg-slate-900/55 p-4"><div className="text-2xl font-black">{baseQuestions.length}</div><div className="text-xs text-white/50">Total Questions</div></div>{bankStats.map((s) => <div key={s.name} className="rounded-2xl bg-slate-900/55 p-4"><div className="text-2xl font-black">{s.count}</div><div className="text-xs text-white/50">{s.name}</div></div>)}</div>
+        <div className="mt-3 grid gap-3 md:grid-cols-3">{difficultyStats.map((s) => <div key={s.name} className="rounded-2xl bg-slate-900/40 p-3"><div className="text-xl font-black">{s.count}</div><div className="text-xs text-white/50">{s.name} difficulty</div></div>)}</div>
         <div className="mt-5 rounded-2xl bg-slate-900/45 p-4"><h3 className="mb-3 font-black">Question Counts by Subcategory</h3><div className="grid max-h-72 gap-2 overflow-auto pr-1 sm:grid-cols-2 lg:grid-cols-4">{topicStats.map((s) => <div key={`${s.category}-${s.name}`} className="rounded-xl bg-white/5 p-3"><div className="text-sm font-bold">{s.name}</div><div className="text-xs text-white/45">{s.category}</div><div className="mt-1 text-lg font-black">{s.count}</div></div>)}</div></div>
       </div>
       <section className="mt-5 rounded-[2rem] border border-cyan-200/20 bg-cyan-300/10 p-6 backdrop-blur-xl">
