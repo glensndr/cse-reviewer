@@ -388,6 +388,103 @@ function arrangeChoices(choices, answer, id) {
   return arranged;
 }
 
+const OVERUSED_DISTRACTORS = new Set([
+  "unrelated to the report",
+  "limited to private use",
+  "done without care",
+  "private advantage over public duty",
+  "unverified rumor as policy basis",
+  "arbitrary treatment without standards",
+  "choose the longest option without checking the rule",
+  "ignore keywords and rely on memory only",
+  "use the same answer letter pattern from previous items"
+]);
+
+const DISTRACTOR_POOLS = {
+  "Verbal Ability": {
+    default: ["partly related but too informal", "grammatical but illogical in context", "formal-sounding but imprecise", "opposite in tone to the sentence", "too broad for the passage evidence", "uses the wrong word relationship", "changes the intended time frame", "confuses cause with result", "fits casual speech but not official writing", "adds an unsupported idea"],
+    Synonyms: ["related but weaker in meaning", "similar in topic but different in use", "a common false synonym", "a word with the opposite tone", "a broader word than the sentence requires", "a narrower word than the target meaning"],
+    Antonyms: ["a synonym rather than an opposite", "a neutral word, not an opposite", "a related action with no contrast", "an opposite of the wrong sense", "a milder word that does not reverse meaning", "a formal word with unrelated meaning"],
+    Vocabulary: ["a related workplace term", "a near meaning with wrong tone", "a familiar but inaccurate meaning", "a context clue from another sentence type", "a word that fits grammar but not meaning", "a partial meaning only"],
+    "Grammar and Correct Usage": ["agrees with the nearest noun only", "uses the wrong pronoun case", "shifts tense without reason", "breaks parallel structure", "creates an unclear modifier", "uses informal syntax"],
+    "Reading Comprehension": ["a minor detail, not the main idea", "an inference not proven by the passage", "an outside fact not stated", "a tone stronger than the passage supports", "a conclusion that reverses the evidence", "a supporting detail used as the central point"]
+  },
+  "Analytical Ability": {
+    default: ["reverses the premise", "assumes more than the facts state", "confuses a possibility with certainty", "uses a related but invalid relationship", "ignores the limiting word in the statement", "draws a conclusion from outside information", "matches the topic but not the logic", "treats some as all", "confuses sequence with cause", "uses an unsupported shortcut"],
+    "Data Interpretation": ["adds values that should be compared", "uses the wrong base", "reads the trend backward", "compares different units", "uses percentage points as percent change", "ignores the table heading"],
+    Logic: ["affirms the consequent", "denies the antecedent", "overgeneralizes from one case", "changes all into some", "uses an unsupported assumption", "reverses sufficient and necessary conditions"]
+  },
+  "General Information": {
+    default: ["political loyalty over public duty", "personal discretion without legal basis", "private convenience over public accountability", "informal practice over written policy", "selective service for favored persons", "confidentiality breach as transparency", "delay without valid public reason", "unequal treatment without classification", "punishment without due process", "agency action outside legal authority"],
+    "Philippine Constitution": ["rule by one branch alone", "unlimited government power", "rights suspended without lawful basis", "private rule replacing public law", "absence of checks and balances", "discretion without constitutional limits"],
+    "Government Structure": ["one office exercising all powers", "courts implementing executive programs", "local units abolishing national law", "legislators deciding individual court cases", "administrative offices ignoring checks and balances", "private groups replacing public authority"],
+    "Current Events": ["viral claims without verification", "reaction without public data", "policy based only on rumor", "ignoring affected communities", "short-term publicity without service impact", "unverified social media posts as official basis"],
+    "Public Service Values": ["favoritism toward acquaintances", "concealing records to avoid criticism", "accepting gifts from regulated parties", "using office resources for private work", "delaying service without explanation", "retaliating against a complainant"]
+  }
+};
+
+const COMMON_DISTRACTOR_POOL = [
+  "uses a rule from another topic",
+  "matches one keyword but not the whole item",
+  "is reasonable sounding but unsupported",
+  "confuses the condition with the result",
+  "uses an incomplete reading of the question",
+  "treats an example as the general rule",
+  "applies the correct idea to the wrong detail",
+  "overlooks the required qualifier",
+  "answers what is familiar instead of what is asked",
+  "uses a shortcut that does not apply here",
+  "misreads the relationship between the facts",
+  "focuses on a minor clue only",
+  "changes the scope of the original statement",
+  "uses a partial solution as the final answer",
+  "ignores the most direct evidence",
+  "confuses formal meaning with casual usage",
+  "uses a public-service value from a different situation",
+  "selects an action before identifying the rule",
+  "assumes a fact not supplied by the item",
+  "uses a comparison with the wrong reference point"
+];
+
+function plausibleDistractors(category, subCategory, answer, id) {
+  const categoryPool = DISTRACTOR_POOLS[category] || {};
+  const pool = [
+    ...(categoryPool[subCategory] || []),
+    ...(categoryPool.default || []),
+    ...COMMON_DISTRACTOR_POOL
+  ];
+  const answerText = String(answer).toLowerCase();
+  return seededShuffle(pool, `${id}-${category}-${subCategory}-plausible-distractors`)
+    .filter((choice) => choice && choice.toLowerCase() !== answerText && !answerText.includes(choice.toLowerCase()))
+    .filter((choice, index, arr) => arr.indexOf(choice) === index);
+}
+
+function qualityChoices(choices, answer, category, subCategory, id) {
+  const isNumerical = category === "Numerical Ability";
+  const clean = [...new Set([answer, ...choices])].filter(Boolean);
+  const filtered = isNumerical ? clean : clean.filter((choice) => choice === answer || !OVERUSED_DISTRACTORS.has(String(choice).toLowerCase()));
+  const result = [answer, ...filtered.filter((choice) => choice !== answer)];
+  if (!isNumerical) plausibleDistractors(category, subCategory, answer, id).forEach((choice) => {
+    if (result.length < 16 && !result.includes(choice)) result.push(choice);
+  });
+  const distractors = seededShuffle(result.filter((choice) => choice !== answer), `${id}-quality-choice-trim`).slice(0, 3);
+  return [answer, ...distractors];
+}
+
+function numericVariantDistractors(answer, variantIndex) {
+  const text = String(answer);
+  const numberMatch = text.match(/-?\d+(?:\.\d+)?/);
+  if (!numberMatch) return ["Cannot be determined", "Uses the wrong operation", "Uses a different base"];
+  const value = Number(numberMatch[0]);
+  const suffix = text.slice(numberMatch.index + numberMatch[0].length);
+  const prefix = text.slice(0, numberMatch.index);
+  const offsets = [variantIndex + 2, variantIndex * 2 + 3, Math.max(1, Math.round(value * (0.08 + (variantIndex % 5) * 0.03)))];
+  return offsets.map((offset, idx) => {
+    const candidate = value + (idx === 1 ? -offset : offset);
+    return `${prefix}${candidate > 0 ? candidate : value + offset + idx + 1}${suffix}`;
+  });
+}
+
 function normalizeSubCategory(category, subCategory) {
   const listed = CATEGORIES.find((cat) => cat.name === category)?.subs || [];
   if (listed.includes(subCategory)) return subCategory;
@@ -438,7 +535,7 @@ function makeQuestion({ id, category, subCategory, difficulty, question, choices
     "The statement reverses the required relationship",
     "The result answers a different question"
   ];
-  const cleanChoices = [...new Set(choices)];
+  const cleanChoices = qualityChoices([...new Set(choices)], answer, category, subCategory, id);
   if (!cleanChoices.includes(answer)) cleanChoices.unshift(answer);
   backupChoices.forEach((choice) => {
     if (cleanChoices.length < 4 && !cleanChoices.includes(choice)) cleanChoices.push(choice);
@@ -1063,12 +1160,13 @@ function variantQuestion(base, variantIndex) {
   const contexts = ["records audit", "frontline service", "permit processing", "budget review", "community program", "procurement check", "citizen complaint", "HR screening", "environmental report", "public assistance"];
   const context = contexts[variantIndex % contexts.length];
   const difficulty = DIFFICULTIES[(DIFFICULTIES.indexOf(base.difficulty) + variantIndex) % DIFFICULTIES.length] || base.difficulty;
+  const variantId = `${base.id}-V${variantIndex}`;
   return makeQuestion({
     ...base,
-    id: `${base.id}-V${variantIndex}`,
+    id: variantId,
     difficulty,
     question: `Variant ${variantIndex}: In a ${context} scenario, ${base.question.replace(/^Item\s+[A-Z0-9-]+:\s*/i, "").replace(/^Variant\s+\d+:\s*/i, "")}`,
-    choices: seededShuffle(base.choices, `${base.id}-${variantIndex}-choices`),
+    choices: base.category === "Numerical Ability" ? [base.answer, ...numericVariantDistractors(base.answer, variantIndex)] : [base.answer, ...plausibleDistractors(base.category, base.subCategory, base.answer, variantId).slice(0, 5)],
     answer: base.answer,
     explanation: `${base.explanation} This variation uses a different ${context} context, but the same tested concept applies.`,
     hint: base.hint,
@@ -1076,7 +1174,7 @@ function variantQuestion(base, variantIndex) {
   });
 }
 
-function expandQuestionPool(bank, minimumPerSub = 60) {
+function expandQuestionPool(bank, minimumPerSub = 360) {
   const expanded = [...bank];
   const grouped = {};
   expanded.forEach((q) => {
@@ -1239,6 +1337,10 @@ function balancedMockQuestions(bank, mode, progress, count) {
   categoryTargets.forEach(({ cat, count: catCount }) => {
     const perDifficulty = difficultyTargets(catCount, mode);
     const catPool = bank.filter((q) => q.category === cat.name);
+    if (mode === "Full Mock Exam") {
+      picked.push(...balancedCategoryQuestions(catPool, mode, progress, catCount));
+      return;
+    }
     const parts = [
       uniqueSessionQuestions(catPool.filter((q) => q.difficulty === "Easy"), perDifficulty.Easy, progress, `${mode}-${cat.name}-easy-${Date.now()}`),
       uniqueSessionQuestions(catPool.filter((q) => q.difficulty === "Medium"), perDifficulty.Medium, progress, `${mode}-${cat.name}-medium-${Date.now()}`),
@@ -1246,7 +1348,12 @@ function balancedMockQuestions(bank, mode, progress, count) {
     ].flat();
     picked.push(...mergeUniqueQuestions(parts, catPool, catCount, `${mode}-${cat.name}-balance-${Date.now()}`));
   });
-  return mergeUniqueQuestions([], picked, count, `${mode}-final-${Date.now()}`);
+  let result = mergeUniqueQuestions([], picked, count, `${mode}-final-${Date.now()}`);
+  categoryTargets.forEach(({ cat, count: catCount }) => {
+    const current = result.filter((q) => q.category === cat.name).length;
+    if (current < catCount) result = mergeUniqueQuestions(result, bank.filter((q) => q.category === cat.name), Math.min(count, result.length + catCount - current), `${mode}-${cat.name}-deficit-${Date.now()}`);
+  });
+  return mergeUniqueQuestions(result, bank, count, `${mode}-final-fill-${Date.now()}`);
 }
 
 function balancedCategoryQuestions(pool, mode, progress, count) {
@@ -1524,7 +1631,7 @@ export default function App() {
   const cloudRefreshInFlightRef = useRef(false);
   const loadedSessionKeyRef = useRef("");
   const profileLoadedRef = useRef(false);
-  const allQuestions = useMemo(() => expandQuestionPool(buildQuestionBank(progress, cloudQuestionRows), 60), [progress.imports, cloudQuestionRows]);
+  const allQuestions = useMemo(() => expandQuestionPool(buildQuestionBank(progress, cloudQuestionRows), 360), [progress.imports, cloudQuestionRows]);
   const stats = useMemo(() => analyze(progress, allQuestions), [progress, allQuestions]);
   const readiness = useMemo(() => {
     const mockCompleted = progress.sessions.filter((s) => s.mode?.includes("Mock") || s.mode === "Full Mock Exam").length;
@@ -1979,7 +2086,7 @@ export default function App() {
 
   const DynamicReviewCenter = () => {
     const selectedCategory = CATEGORIES.find((cat) => cat.name === category);
-    const hasSelection = category !== "All Categories" || subCategory !== "All Topics";
+    const hasSelection = category !== "All Categories" && subCategory !== "All Topics";
     const topicSelected = !!selectedCategory && subCategory !== "All Topics";
     const lesson = topicSelected ? selectedLesson : null;
     const topicReview = topicSelected ? reviewContentFor(category, subCategory) : null;
@@ -1991,21 +2098,21 @@ export default function App() {
       if (mockExamNumber(nextMode) && !isMockUnlocked(progress, nextMode)) return;
       startExam(category, nextMode, subCategory);
     };
-    return <section id="review-center" className="mt-6 rounded-[1.5rem] border border-white/10 bg-white/[.07] p-5 backdrop-blur-xl">
-      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-        <div><h3 className="text-xl font-black">Review Center</h3><p className="mt-1 text-sm text-white/55">This center follows your selected category and topic.</p></div>
-        <div className="grid w-full gap-2 rounded-3xl border border-white/10 bg-slate-950/60 p-2 sm:w-auto sm:grid-cols-2">
-          {[["Learn", "📚 LEARN"], ["Test", "📝 TEST"]].map(([tab, label]) => <button key={tab} onClick={() => setLearningTab(tab)} className={`min-h-12 rounded-2xl px-6 text-base font-black tracking-wide transition sm:min-w-36 ${learningTab === tab ? "bg-gradient-to-r from-emerald-300 to-cyan-300 text-slate-950 shadow-glow" : "bg-white/10 text-white/75 hover:bg-white/15"}`}>{label}</button>)}
+    return <section id="review-center" className="mt-4 rounded-[1.5rem] border border-white/10 bg-white/[.07] p-4 backdrop-blur-xl">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+        <h3 className="text-xl font-black">REVIEW CENTER</h3>
+        <div className="grid w-full gap-2 rounded-3xl border border-white/10 bg-slate-950/60 p-1.5 sm:w-auto sm:grid-cols-2">
+          {[["Learn", "Learn"], ["Test", "Test"]].map(([tab, label]) => <button key={tab} disabled={!hasSelection} onClick={() => hasSelection && setLearningTab(tab)} className={`min-h-11 rounded-2xl px-6 text-base font-black tracking-wide transition sm:min-w-32 ${!hasSelection ? "cursor-not-allowed bg-white/5 text-white/30" : learningTab === tab ? "bg-gradient-to-r from-emerald-300 to-cyan-300 text-slate-950 shadow-glow" : "bg-white/10 text-white/75 hover:bg-white/15"}`}>{label}</button>)}
         </div>
       </div>
-      {!hasSelection && <div className="rounded-2xl bg-slate-900/45 p-6 text-center text-white/70">Select a category or topic to start learning.</div>}
-      {hasSelection && !topicSelected && selectedCategory && <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-4">
+      {!hasSelection && <div className="rounded-2xl bg-slate-900/45 p-5 text-center text-white/70">Select a Category and Topic/Sub-category to begin.</div>}
+      {selectedCategory && !topicSelected && <div className="mt-3 grid gap-3 md:grid-cols-2 lg:grid-cols-4">
         {selectedCategory.subs.map((topic) => <button key={topic} onClick={() => { setSubCategory(topic); setLearningTab("Learn"); }} className="rounded-2xl bg-slate-900/45 p-4 text-left transition hover:bg-white/10"><b>{topic}</b><p className="mt-2 text-xs text-white/45">{allQuestions.filter((q) => q.category === selectedCategory.name && q.subCategory === topic).length} questions available</p></button>)}
       </div>}
       {topicSelected && lesson && topicReview && learningTab === "Learn" && <div className="grid gap-4 lg:grid-cols-2">
         {[["Actual Lesson Content", topicReview.lessons], ["Topic Definitions", topicReview.definitions], ["Core Concepts", topicReview.concepts], ["Rules / Formulas", topicReview.rules], ["Examples", topicReview.examples], ["Worked Solutions", topicReview.worked], ["Topic-Specific Tips", topicReview.tips], ["Common Mistakes", topicReview.mistakes], ["Exam Patterns", topicReview.patterns], ["Memory Aids", topicReview.memory], ["Most Missed Questions", stats.subStats.find((s) => s.name === subCategory)?.wrong ? [`You have missed ${stats.subStats.find((s) => s.name === subCategory)?.wrong} item(s) in this topic. Use Wrong Drill until corrected.`] : [`No missed ${subCategory} questions recorded yet.`]]].map(([title, rows]) => <div key={title} className="rounded-2xl bg-slate-900/45 p-4"><h4 className="font-black">{title}</h4>{rows.map((row) => <p key={row} className="mt-2 text-sm leading-7 text-white/65">{row}</p>)}</div>)}
       </div>}
-      {hasSelection && learningTab === "Test" && <div className="space-y-5">
+      {topicSelected && learningTab === "Test" && <div className="space-y-5">
         <div className="rounded-2xl bg-slate-900/45 p-4">
           <h4 className="font-black">Topic Test</h4>
           <p className="mt-2 text-sm text-white/60">Start a focused 25-question test for the selected category or topic before moving into mock exams.</p>
@@ -2045,16 +2152,16 @@ export default function App() {
             ))}
           </div>
           <div className="mt-6 rounded-3xl border border-emerald-200/40 bg-emerald-300/10 p-4 shadow-glow">
-            <div className="mb-3 flex flex-wrap items-center gap-2"><Pill className="border-emerald-200/40 bg-emerald-300/20 text-emerald-50">📍 START HERE</Pill><span className="text-sm font-bold text-emerald-100">Step 1: Select Category • Step 2: Select Topic/Sub-category</span></div>
+            <div className="mb-3 flex flex-wrap items-center gap-2"><Pill className="border-emerald-200/40 bg-emerald-300/20 text-emerald-50">START HERE</Pill><span className="text-sm font-bold text-emerald-100">Step 1: Select Category - Step 2: Select Topic/Sub-category - Step 3: Review Center - Learn, then Test</span></div>
             <div className="grid gap-3 md:grid-cols-3">
             <label className="text-xs font-black uppercase tracking-wide text-emerald-100">Step 1: Select Category
-              <select value={category} onChange={(e) => { setCategory(e.target.value); setSubCategory("All Topics"); }} className="mt-2 min-h-12 w-full rounded-2xl border border-white/10 bg-slate-900 px-4 text-sm text-white">
+              <select value={category} onChange={(e) => { setCategory(e.target.value); setSubCategory("All Topics"); setLearningTab("Learn"); }} className="mt-2 min-h-12 w-full rounded-2xl border border-white/10 bg-slate-900 px-4 text-sm text-white">
                 <option>All Categories</option>
                 {CATEGORIES.map((cat) => <option key={cat.name}>{cat.name}</option>)}
               </select>
             </label>
             <label className="text-xs font-black uppercase tracking-wide text-emerald-100 md:col-span-2">Step 2: Select Topic/Sub-category
-              <select value={subCategory} onChange={(e) => setSubCategory(e.target.value)} className="mt-2 min-h-12 w-full rounded-2xl border border-white/10 bg-slate-900 px-4 text-sm text-white">
+              <select value={subCategory} onChange={(e) => { setSubCategory(e.target.value); setLearningTab("Learn"); }} className="mt-2 min-h-12 w-full rounded-2xl border border-white/10 bg-slate-900 px-4 text-sm text-white">
                 {availableTopics.map((topic) => <option key={topic}>{topic}</option>)}
               </select>
             </label>
