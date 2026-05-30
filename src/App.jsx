@@ -2200,11 +2200,30 @@ export default function App() {
     try {
       for (let index = 0; index < rows.length; index += 200) {
         const batch = rows.slice(index, index + 200);
-        const result = await supabase.from("question_bank").upsert(batch, { onConflict: "id" }).select("*");
+        let result = await supabase.from("question_bank").upsert(batch, { onConflict: "id" }).select("*");
         if (result.error) {
-          setSupabaseError("imported reviewer publish failed", result.error);
-          setImportMessage("Transfer failed. Please confirm your account is Admin and the question_bank schema/policies are deployed.");
-          return;
+          setSupabaseError("imported reviewer publish with metadata failed", result.error);
+          const fallbackBatch = batch.map((row) => ({
+            id: row.id,
+            category: row.category,
+            sub_category: row.sub_category,
+            difficulty: row.difficulty,
+            question: row.question,
+            choices: row.choices,
+            answer: row.answer,
+            explanation: row.explanation,
+            hint: row.hint,
+            learning_tip: row.learning_tip,
+            source: row.source,
+            status: row.status
+          }));
+          result = await supabase.from("question_bank").upsert(fallbackBatch, { onConflict: "id" }).select("*");
+          if (result.error) {
+            setSupabaseError("imported reviewer publish fallback failed", result.error);
+            const reason = result.error.message || "Supabase rejected the transfer.";
+            setImportMessage(`Transfer failed: ${reason}. Confirm glensndr@gmail.com has role Admin and status Approved, then verify question_bank RLS policies are deployed.`);
+            return;
+          }
         }
         savedRows = [...savedRows, ...(result.data || batch)];
       }
