@@ -1150,7 +1150,7 @@ function generateSupplementalCoverage() {
   return questions;
 }
 
-const QUESTION_BANK = [...generateVerbal(), ...generateAnalytical(), ...generateNumerical(), ...generateGeneralInfo(), ...generateSupplementalCoverage()];
+const QUESTION_BANK = [];
 
 const initialProgress = {
   xp: 0,
@@ -1302,7 +1302,7 @@ function analyze(progress, bank = QUESTION_BANK) {
 
 function buildQuestionBank(progress, cloudRows = []) {
   const cloudQuestions = (cloudRows || []).filter((row) => !row.status || row.status === "Approved").map(normalizeDbQuestion).filter(Boolean);
-  return [...QUESTION_BANK, ...cloudQuestions, ...(progress.imports || []).flatMap((item) => generatedFromImport(item, Math.max(80, ((item.topics || []).length || 4) * 50)))];
+  return [...QUESTION_BANK, ...cloudQuestions];
 }
 
 function questionSignature(q) {
@@ -2285,6 +2285,10 @@ export default function App() {
   function startExam(nextCategory = category, nextMode = mode, nextSubCategory = subCategory) {
     const safeSub = nextCategory === "All Categories" && nextMode === "Full Mock Exam" ? "All Topics" : nextSubCategory;
     const qs = selectQuestions(nextCategory, nextMode, progress, safeSub, allQuestions);
+    if (!qs.length) {
+      alert("The active question bank is currently empty. Add approved questions from Admin Import or AI Content Studio before starting an exam.");
+      return;
+    }
     setCategory(nextCategory); setMode(nextMode); setSubCategory(safeSub);
     const timedModes = ["Timed Exam", ...MOCK_EXAM_MODES, "Full Mock Exam"];
     const mockNumber = mockExamNumber(nextMode);
