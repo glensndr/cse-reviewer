@@ -47,6 +47,15 @@ create table if not exists public.question_bank (
   hint text,
   learning_tip text,
   source text default 'built-in',
+  status text not null default 'Approved',
+  tags jsonb not null default '[]'::jsonb,
+  date_generated timestamptz,
+  approved_by text,
+  approved_at timestamptz,
+  times_answered integer not null default 0,
+  correct_count integer not null default 0,
+  wrong_count integer not null default 0,
+  difficulty_score numeric not null default 0,
   created_at timestamptz not null default now()
 );
 
@@ -55,6 +64,10 @@ create table if not exists public.lessons (
   category text not null,
   topic text not null,
   content jsonb not null,
+  source text not null default 'built-in',
+  status text not null default 'Approved',
+  approved_by text,
+  approved_at timestamptz,
   created_at timestamptz not null default now()
 );
 
@@ -142,7 +155,9 @@ drop policy if exists "profiles update own safe fields" on public.user_profiles;
 drop policy if exists "profiles admin update" on public.user_profiles;
 drop policy if exists "progress own" on public.user_progress;
 drop policy if exists "question bank readable" on public.question_bank;
+drop policy if exists "question bank admin write" on public.question_bank;
 drop policy if exists "lessons readable" on public.lessons;
+drop policy if exists "lessons admin write" on public.lessons;
 drop policy if exists "mock exams own or admin" on public.mock_exams;
 drop policy if exists "bookmarks own" on public.bookmarks;
 drop policy if exists "analytics own or admin" on public.analytics;
@@ -167,13 +182,19 @@ for update
 using (public.is_admin())
 with check (public.is_admin());
 create policy "progress own" on public.user_progress for all using (user_id = auth.uid()) with check (user_id = auth.uid());
-create policy "question bank readable" on public.question_bank for select using (true);
-create policy "lessons readable" on public.lessons for select using (true);
+create policy "question bank readable" on public.question_bank for select using (status = 'Approved' or public.is_admin());
+create policy "question bank admin write" on public.question_bank for all using (public.is_admin()) with check (public.is_admin());
+create policy "lessons readable" on public.lessons for select using (status = 'Approved' or public.is_admin());
+create policy "lessons admin write" on public.lessons for all using (public.is_admin()) with check (public.is_admin());
 create policy "mock exams own or admin" on public.mock_exams for all using (user_id = auth.uid() or public.is_admin()) with check (user_id = auth.uid() or public.is_admin());
 create policy "bookmarks own" on public.bookmarks for all using (user_id = auth.uid()) with check (user_id = auth.uid());
 create policy "analytics own or admin" on public.analytics for all using (user_id = auth.uid() or public.is_admin()) with check (user_id = auth.uid() or public.is_admin());
 create policy "login history own or admin" on public.login_history for all using (user_id = auth.uid() or public.is_admin()) with check (user_id = auth.uid() or public.is_admin());
 create policy "device sessions own or admin" on public.device_sessions for all using (user_id = auth.uid() or public.is_admin()) with check (user_id = auth.uid() or public.is_admin());
+
+grant usage on schema public to anon, authenticated;
+grant select on public.question_bank, public.lessons to anon, authenticated;
+grant insert, update, delete on public.question_bank, public.lessons to authenticated;
 
 create or replace function public.handle_new_user()
 returns trigger

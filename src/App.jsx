@@ -21,7 +21,6 @@ import {
   LineChart,
   ListFilter,
   Lock,
-  Play,
   RotateCcw,
   ShieldCheck,
   Sparkles,
@@ -1110,6 +1109,8 @@ const initialProgress = {
   drillMastery: {},
   bookmarks: {},
   imports: [],
+  aiDrafts: [],
+  aiLessons: [],
   account: null,
   sessions: [],
   onboardingComplete: false,
@@ -1227,7 +1228,7 @@ function analyze(progress, bank = QUESTION_BANK) {
 }
 
 function buildQuestionBank(progress, cloudRows = []) {
-  const cloudQuestions = (cloudRows || []).map(normalizeDbQuestion).filter(Boolean);
+  const cloudQuestions = (cloudRows || []).filter((row) => !row.status || row.status === "Approved").map(normalizeDbQuestion).filter(Boolean);
   return [...QUESTION_BANK, ...cloudQuestions, ...(progress.imports || []).flatMap((item) => generatedFromImport(item, Math.max(80, ((item.topics || []).length || 4) * 50)))];
 }
 
@@ -1452,6 +1453,101 @@ function generatedFromImport(importItem, count = 12) {
   });
 }
 
+const AI_STUDIO_MODULES = ["AI Question Generator", "AI Lesson Generator", "AI Review Notes Generator", "AI Current Events Generator", "AI Content Audit"];
+const AI_COUNTS = [10, 20, 30, 50];
+const AI_DIFFICULTIES = ["Easy", "Moderate", "Difficult"];
+const toBankDifficulty = (difficulty) => difficulty === "Moderate" ? "Medium" : difficulty === "Difficult" ? "Hard" : difficulty;
+
+function aiQuestionStem(category, topic, difficulty, index) {
+  const scenario = ["permit request", "citizen complaint", "records audit", "budget review", "public advisory", "training session", "procurement check", "disaster response", "online service", "frontline interview"][index % 10];
+  if (category === "Numerical Ability") return `A ${scenario} involves ${24 + index} completed items out of ${80 + index * 2} total items. Which computation best applies the ${topic} concept?`;
+  if (category === "Verbal Ability") return `In a ${scenario}, which option best demonstrates ${topic} in formal Civil Service exam style?`;
+  if (category === "Analytical Ability") return `A ${scenario} includes a statement, evidence, and a possible conclusion. Which option best applies ${topic} reasoning?`;
+  return `A government office handles a ${scenario}. Which action best reflects ${topic} under public-service standards?`;
+}
+
+function aiCorrectAnswer(category, topic, index) {
+  if (category === "Numerical Ability") return `Use the ${topic} formula with the stated base before computing`;
+  if (category === "Verbal Ability") return `Choose the wording that matches context, grammar, and formal tone`;
+  if (category === "Analytical Ability") return `Accept only the conclusion supported by the stated facts`;
+  if (topic === "Current Events") return "Use verified public information and connect it to government service impact";
+  return `Apply the ${topic} principle with fairness, accountability, and legal basis`;
+}
+
+function createAiQuestionDrafts({ category, topic, difficulty, count, existingQuestions, adminEmail }) {
+  const bankDifficulty = toBankDifficulty(difficulty);
+  return Array.from({ length: Number(count) || 10 }, (_, index) => {
+    const id = `AI-${Date.now()}-${hashText(`${category}-${topic}-${difficulty}-${index}`)}`;
+    const answer = aiCorrectAnswer(category, topic, index);
+    const choices = qualityChoices([answer, ...plausibleDistractors(category, topic, answer, id)], answer, category, topic, id);
+    const question = makeQuestion({
+      id,
+      category,
+      subCategory: topic,
+      difficulty: bankDifficulty,
+      question: aiQuestionStem(category, topic, difficulty, index),
+      choices,
+      answer,
+      explanation: `Draft explanation: identify the tested ${topic} rule, compare each option against the facts, and choose the answer that is supported without adding assumptions. This item must be reviewed before publishing.`,
+      hint: `Look for the ${topic} rule and reject choices that use a different principle.`,
+      learningTip: `After approval, use this ${topic} item to strengthen analysis rather than memorized answer patterns.`
+    });
+    const qSig = questionSignature(question);
+    const duplicates = existingQuestions.filter((item) => questionSignature(item) === qSig).slice(0, 3);
+    return {
+      ...question,
+      draftId: id,
+      source: "AI",
+      status: "Draft",
+      tags: [category, topic, bankDifficulty, "admin-reviewed-required"],
+      dateGenerated: new Date().toISOString(),
+      generatedBy: adminEmail || "Admin",
+      audit: {
+        duplicateQuestions: duplicates.map((item) => item.id),
+        duplicateDistractors: question.choices.filter((choice, choiceIndex, arr) => choice !== question.answer && arr.indexOf(choice) !== choiceIndex),
+        notes: duplicates.length ? "Potential duplicate question wording detected." : "No exact duplicate question wording detected."
+      }
+    };
+  });
+}
+
+function createAiLessonDraft({ category, topic, adminEmail }) {
+  const review = reviewContentFor(category, topic);
+  const id = `AIL-${Date.now()}-${hashText(`${category}-${topic}`)}`;
+  return {
+    id,
+    category,
+    topic,
+    source: "AI",
+    status: "Draft",
+    dateGenerated: new Date().toISOString(),
+    generatedBy: adminEmail || "Admin",
+    content: {
+      lessonContent: review.lessons,
+      coreConcepts: review.concepts,
+      notes: review.definitions,
+      reviewMaterials: review.examples,
+      examStrategies: review.patterns,
+      tipsAndTricks: review.tips,
+      topicGuides: review.rules,
+      memoryTechniques: review.memory,
+      commonExamPatterns: review.patterns,
+      practiceExamples: review.worked
+    },
+    audit: { notes: "Lesson draft generated from the topic reviewer model. Admin must edit or approve before publishing." }
+  };
+}
+
+function contentAuditReport(bank) {
+  const byTopic = CATEGORIES.flatMap((cat) => cat.subs.map((sub) => {
+    const rows = bank.filter((q) => q.category === cat.name && q.subCategory === sub);
+    const distractorCounts = rows.flatMap((q) => q.choices.filter((choice) => choice !== q.answer)).reduce((map, choice) => ({ ...map, [choice]: (map[choice] || 0) + 1 }), {});
+    const repeated = Object.entries(distractorCounts).filter(([, count]) => count > 12).sort((a, b) => b[1] - a[1]).slice(0, 3);
+    return { category: cat.name, topic: sub, questions: rows.length, mockCapacity: Math.floor(rows.length / 25), repeated };
+  }));
+  return byTopic;
+}
+
 function choiceInsight(q, choice, index) {
   if (choice === q.answer) return `${choiceLetters[index]} is correct because it matches the tested rule and the situation exactly.`;
   if (q.category === "Verbal Ability") return `${choiceLetters[index]} is wrong because it does not fit the sentence context, grammar pattern, tone, or passage evidence as well as the correct answer.`;
@@ -1623,6 +1719,12 @@ export default function App() {
   const [cloudUsers, setCloudUsers] = useState([]);
   const [adminMessage, setAdminMessage] = useState("");
   const [adminSearch, setAdminSearch] = useState("");
+  const [aiStudioModule, setAiStudioModule] = useState("AI Question Generator");
+  const [aiStudioCategory, setAiStudioCategory] = useState("Verbal Ability");
+  const [aiStudioTopic, setAiStudioTopic] = useState("Vocabulary");
+  const [aiStudioDifficulty, setAiStudioDifficulty] = useState("Moderate");
+  const [aiStudioCount, setAiStudioCount] = useState(10);
+  const [aiStudioMessage, setAiStudioMessage] = useState("");
   const [loginHistory, setLoginHistory] = useState([]);
   const [deviceSessions, setDeviceSessions] = useState([]);
   const [cloudQuestionRows, setCloudQuestionRows] = useState([]);
@@ -1658,6 +1760,11 @@ export default function App() {
     if (!error) return;
     console.warn(`[CSE Supabase] ${label}`, error);
   }
+
+  useEffect(() => {
+    const topics = CATEGORIES.find((cat) => cat.name === aiStudioCategory)?.subs || [];
+    if (topics.length && !topics.includes(aiStudioTopic)) setAiStudioTopic(topics[0]);
+  }, [aiStudioCategory, aiStudioTopic]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -1886,6 +1993,107 @@ export default function App() {
     }
   }
 
+  function generateAiStudioDrafts() {
+    if (!isAdmin) return;
+    setAiStudioMessage("");
+    if (aiStudioModule === "AI Question Generator" || aiStudioModule === "AI Current Events Generator") {
+      const category = aiStudioModule === "AI Current Events Generator" ? "General Information" : aiStudioCategory;
+      const topic = aiStudioModule === "AI Current Events Generator" ? "Current Events" : aiStudioTopic;
+      const drafts = createAiQuestionDrafts({
+        category,
+        topic,
+        difficulty: aiStudioDifficulty,
+        count: aiStudioCount,
+        existingQuestions: allQuestions,
+        adminEmail: profile?.gmail_address
+      });
+      setProgress((p) => ({ ...p, aiDrafts: [...drafts, ...(p.aiDrafts || [])].slice(0, 250) }));
+      setAiStudioMessage(`${drafts.length} AI question drafts created. Review, edit, and approve before students can see them.`);
+      return;
+    }
+    const lesson = createAiLessonDraft({ category: aiStudioCategory, topic: aiStudioTopic, adminEmail: profile?.gmail_address });
+    setProgress((p) => ({ ...p, aiLessons: [lesson, ...(p.aiLessons || [])].slice(0, 80) }));
+    setAiStudioMessage("AI lesson/review draft created. Review and approve before publishing to lessons.");
+  }
+
+  function updateAiDraftStatus(draftId, status) {
+    setProgress((p) => ({
+      ...p,
+      aiDrafts: (p.aiDrafts || []).map((draft) => draft.draftId === draftId ? { ...draft, status } : draft),
+      aiLessons: (p.aiLessons || []).map((draft) => draft.id === draftId ? { ...draft, status } : draft)
+    }));
+  }
+
+  function editAiDraft(draftId) {
+    const current = (progress.aiDrafts || []).find((draft) => draft.draftId === draftId);
+    if (!current) return;
+    const updatedQuestion = window.prompt("Edit question text before approval:", current.question.replace(/^Item\s+[A-Z0-9-]+:\s*/i, ""));
+    if (!updatedQuestion) return;
+    setProgress((p) => ({
+      ...p,
+      aiDrafts: (p.aiDrafts || []).map((draft) => draft.draftId === draftId ? { ...draft, question: `Item ${draft.id}: ${updatedQuestion}`, status: "Draft" } : draft)
+    }));
+  }
+
+  async function approveAiQuestion(draft) {
+    if (!isAdmin || !draft) return;
+    const approved = { ...draft, status: "Approved", approvedBy: profile?.gmail_address || "Admin", approvedAt: new Date().toISOString() };
+    const cloudPayload = {
+      id: approved.id,
+      category: approved.category,
+      sub_category: approved.subCategory,
+      difficulty: approved.difficulty,
+      question: approved.question.replace(/^Item\s+[A-Z0-9-]+:\s*/i, ""),
+      choices: approved.choices,
+      answer: approved.answer,
+      explanation: approved.explanation,
+      hint: approved.hint,
+      learning_tip: approved.learningTip,
+      source: "AI",
+      status: "Approved",
+      tags: approved.tags,
+      date_generated: approved.dateGenerated,
+      approved_by: approved.approvedBy,
+      approved_at: approved.approvedAt
+    };
+    let saved = false;
+    if (supabase) {
+      const insertResult = await supabase.from("question_bank").upsert(cloudPayload, { onConflict: "id" });
+      if (insertResult.error) {
+        setSupabaseError("AI question publish with metadata failed", insertResult.error);
+        const fallbackResult = await supabase.from("question_bank").upsert({
+          id: cloudPayload.id,
+          category: cloudPayload.category,
+          sub_category: cloudPayload.sub_category,
+          difficulty: cloudPayload.difficulty,
+          question: cloudPayload.question,
+          choices: cloudPayload.choices,
+          answer: cloudPayload.answer,
+          explanation: cloudPayload.explanation,
+          hint: cloudPayload.hint,
+          learning_tip: cloudPayload.learning_tip,
+          source: "AI"
+        }, { onConflict: "id" });
+        setSupabaseError("AI question publish fallback failed", fallbackResult.error);
+        saved = !fallbackResult.error;
+      } else saved = true;
+    }
+    setCloudQuestionRows((rows) => [{ ...cloudPayload, sub_category: cloudPayload.sub_category, learning_tip: cloudPayload.learning_tip }, ...rows.filter((row) => row.id !== cloudPayload.id)]);
+    updateAiDraftStatus(draft.draftId, saved ? "Approved" : "Approved");
+    setAiStudioMessage(saved ? "Question approved and published to the existing question bank." : "Question approved locally. Run the AI schema migration if Supabase publish is blocked by RLS or missing columns.");
+  }
+
+  async function approveAiLesson(draft) {
+    if (!isAdmin || !draft) return;
+    const approved = { ...draft, status: "Approved", approvedBy: profile?.gmail_address || "Admin", approvedAt: new Date().toISOString() };
+    if (supabase) {
+      const result = await supabase.from("lessons").upsert({ id: approved.id, category: approved.category, topic: approved.topic, content: approved.content }, { onConflict: "id" });
+      setSupabaseError("AI lesson publish failed", result.error);
+    }
+    setProgress((p) => ({ ...p, aiLessons: (p.aiLessons || []).map((item) => item.id === draft.id ? approved : item) }));
+    setAiStudioMessage("Lesson draft approved. It is stored for the Review Center content pipeline.");
+  }
+
   function completeTour() {
     setShowTour(false);
     setTourStep(0);
@@ -2092,7 +2300,6 @@ export default function App() {
     const topicReview = topicSelected ? reviewContentFor(category, subCategory) : null;
     const completedMocks = MOCK_EXAM_MODES.filter((nextMode) => hasPassedMock(progress, mockExamNumber(nextMode))).length;
     const disabledClass = "cursor-not-allowed border border-white/10 bg-white/5 text-white/35";
-    const primaryClass = "bg-white text-slate-950 hover:scale-[1.02]";
     const run = (nextMode) => {
       if (!hasSelection) return;
       if (mockExamNumber(nextMode) && !isMockUnlocked(progress, nextMode)) return;
@@ -2113,11 +2320,6 @@ export default function App() {
         {[["Actual Lesson Content", topicReview.lessons], ["Topic Definitions", topicReview.definitions], ["Core Concepts", topicReview.concepts], ["Rules / Formulas", topicReview.rules], ["Examples", topicReview.examples], ["Worked Solutions", topicReview.worked], ["Topic-Specific Tips", topicReview.tips], ["Common Mistakes", topicReview.mistakes], ["Exam Patterns", topicReview.patterns], ["Memory Aids", topicReview.memory], ["Most Missed Questions", stats.subStats.find((s) => s.name === subCategory)?.wrong ? [`You have missed ${stats.subStats.find((s) => s.name === subCategory)?.wrong} item(s) in this topic. Use Wrong Drill until corrected.`] : [`No missed ${subCategory} questions recorded yet.`]]].map(([title, rows]) => <div key={title} className="rounded-2xl bg-slate-900/45 p-4"><h4 className="font-black">{title}</h4>{rows.map((row) => <p key={row} className="mt-2 text-sm leading-7 text-white/65">{row}</p>)}</div>)}
       </div>}
       {topicSelected && learningTab === "Test" && <div className="space-y-5">
-        <div className="rounded-2xl bg-slate-900/45 p-4">
-          <h4 className="font-black">Topic Test</h4>
-          <p className="mt-2 text-sm text-white/60">Start a focused 25-question test for the selected category or topic before moving into mock exams.</p>
-          <button onClick={() => run("Mini Quiz")} className={`mt-4 inline-flex min-h-12 items-center justify-center gap-2 rounded-2xl px-5 font-bold transition ${hasSelection ? primaryClass : disabledClass}`}><Play className="h-4 w-4" />Start Topic Test</button>
-        </div>
         <div className="rounded-2xl bg-slate-900/45 p-4"><h4 className="mb-2 font-black">🔒 Mock Exam Progression</h4><p className="text-sm leading-7 text-white/65">Pass each Mock Exam to unlock the next level. Mock Exam 1 → Mock Exam 2 → Mock Exam 3 → ... → Mock Exam 10.</p><p className="mb-3 mt-2 text-sm font-bold text-emerald-100">Completed: {completedMocks} / 10 Mock Exams</p><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">{MOCK_EXAM_MODES.map((nextMode) => {
           const unlocked = isMockUnlocked(progress, nextMode);
           return <button key={nextMode} disabled={!hasSelection || !unlocked} onClick={() => run(nextMode)} className={`min-h-12 rounded-2xl px-4 font-bold transition ${hasSelection && unlocked ? "bg-white text-slate-950 hover:scale-[1.02]" : disabledClass}`}>{!unlocked && <Lock className="mr-2 inline h-4 w-4" />}{nextMode}</button>;
@@ -2136,7 +2338,7 @@ export default function App() {
     <div className="mx-auto max-w-7xl px-4 py-8">
       <section className="mb-6 rounded-[1.5rem] border border-emerald-200/20 bg-emerald-300/10 p-5 backdrop-blur-xl">
         <div className="flex flex-wrap items-start justify-between gap-4">
-          <div><h2 className="text-xl font-black">How to Use CSE Mastery</h2><p className="mt-2 max-w-4xl text-sm leading-7 text-white/70">Step 1: Select Category. Step 2: Select Topic. Step 3: Study in Learn Tab. Step 4: Take Topic Test. Step 5: Use Wrong Drill from Study Tools. Step 6: Progress through Mock Exam 1 to Mock Exam 10. Step 7: Take the Full CSE Simulation.</p></div>
+          <div><h2 className="text-xl font-black">How to Use CSE Mastery</h2><p className="mt-2 max-w-4xl text-sm leading-7 text-white/70">Step 1: Select Category. Step 2: Select Topic. Step 3: Study in Learn Tab. Step 4: Open Test Tab. Step 5: Progress through Mock Exam 1 to Mock Exam 10. Step 6: Take the Full CSE Simulation. Use Wrong Drill from Study Tools when you need correction practice.</p></div>
           <button onClick={() => { setTourStep(0); setShowTour(true); }} className="rounded-2xl bg-white px-5 py-3 font-black text-slate-950">Open Guide</button>
         </div>
       </section>
@@ -2333,7 +2535,7 @@ export default function App() {
         </div>
       </aside>
       <section className="rounded-[1.5rem] border border-white/10 bg-white/[.07] p-6 backdrop-blur-xl">
-        <div className="mb-4 flex flex-wrap items-center justify-between gap-3"><div><p className="text-sm text-emerald-200">{activeLesson.category}</p><h2 className="text-3xl font-black">{activeLesson.topic}</h2></div><button onClick={() => { setCategory(activeLesson.category); setSubCategory(activeLesson.topic); startExam(activeLesson.category, "Mini Quiz", activeLesson.topic); }} className="rounded-2xl bg-emerald-300 px-5 py-3 font-black text-slate-950">Guided Quiz</button></div>
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3"><div><p className="text-sm text-emerald-200">{activeLesson.category}</p><h2 className="text-3xl font-black">{activeLesson.topic}</h2></div><button onClick={() => { setCategory(activeLesson.category); setSubCategory(activeLesson.topic); setLearningTab("Learn"); setScreen("dashboard"); }} className="rounded-2xl bg-emerald-300 px-5 py-3 font-black text-slate-950">Open Review Center</button></div>
         {[["Topic Introduction", activeLesson.introduction], ["Detailed Explanation", activeLesson.explanation], ["Study Notes", activeLesson.notes], ["Memory Aid", activeLesson.memoryAid]].map(([title, body]) => <div key={title} className="mb-4 rounded-2xl bg-slate-900/45 p-4"><h3 className="font-black">{title}</h3><p className="mt-2 text-sm leading-7 text-white/70">{body}</p></div>)}
         {activeLesson.category === "Numerical Ability" && NUMERICAL_LESSON_DETAILS[activeLesson.topic] && <div className="mb-4 rounded-2xl border border-amber-200/20 bg-amber-300/10 p-5">
           <h3 className="mb-3 text-xl font-black text-amber-100">Numerical Formula Lab</h3>
@@ -2348,7 +2550,6 @@ export default function App() {
         <div className="grid gap-4 md:grid-cols-2">
           {[["Examples", activeLesson.examples], ["Common Mistakes", activeLesson.commonMistakes], ["Step-by-Step Guide", activeLesson.stepGuide], ["Test-Taking Techniques", activeLesson.techniques], ["Civil Service Exam Tips", activeLesson.tips], ["Do's and Don'ts", [...activeLesson.dos.map((x) => `Do: ${x}`), ...activeLesson.donts.map((x) => `Don't: ${x}`)]]].map(([title, rows]) => <div key={title} className="rounded-2xl bg-slate-900/45 p-4"><h3 className="mb-2 font-black">{title}</h3>{rows.map((row) => <p key={row} className="mb-2 text-sm text-white/65">{row}</p>)}</div>)}
         </div>
-        <div className="mt-5 flex flex-wrap gap-3"><button onClick={() => startExam(activeLesson.category, "Mini Quiz", activeLesson.topic)} className="rounded-2xl bg-white px-5 py-3 font-bold text-slate-950">20-Question Topic Test</button></div>
       </section>
     </div>;
   };
@@ -2358,6 +2559,10 @@ export default function App() {
     const topicStats = CATEGORIES.flatMap((cat) => cat.subs.map((sub) => ({ category: cat.short, name: sub, count: allQuestions.filter((q) => q.category === cat.name && q.subCategory === sub).length })));
     const searchedUsers = cloudUsers.filter((user) => `${user.full_name} ${user.gmail_address} ${user.status}`.toLowerCase().includes(adminSearch.toLowerCase()));
     const pendingUsers = searchedUsers.filter((user) => ["Trial Pending", "Trial Active"].includes(user.status));
+    const aiDrafts = progress.aiDrafts || [];
+    const aiLessons = progress.aiLessons || [];
+    const aiAuditRows = contentAuditReport(allQuestions);
+    const aiTopics = CATEGORIES.find((cat) => cat.name === aiStudioCategory)?.subs || [];
     if (!isAdmin) return <div className="mx-auto max-w-4xl px-4 py-10"><section className="rounded-[2rem] border border-white/10 bg-white/[.08] p-7 text-center backdrop-blur-xl"><h2 className="text-3xl font-black">Admin Access Required</h2><p className="mt-3 text-white/60">Only accounts with the Admin role can manage users, licenses, sessions, and approvals.</p></section></div>;
     return <div className="mx-auto max-w-7xl px-4 py-8">
       <div className="rounded-[2rem] border border-white/10 bg-white/[.08] p-6 backdrop-blur-xl">
@@ -2365,6 +2570,22 @@ export default function App() {
         <div className="mt-6 grid gap-3 md:grid-cols-5"><div className="rounded-2xl bg-slate-900/55 p-4"><div className="text-2xl font-black">{allQuestions.length}</div><div className="text-xs text-white/50">Total Questions</div></div>{bankStats.map((s) => <div key={s.name} className="rounded-2xl bg-slate-900/55 p-4"><div className="text-2xl font-black">{s.count}</div><div className="text-xs text-white/50">{s.name}</div></div>)}</div>
         <div className="mt-5 rounded-2xl bg-slate-900/45 p-4"><h3 className="mb-3 font-black">Question Counts by Subcategory</h3><div className="grid max-h-72 gap-2 overflow-auto pr-1 sm:grid-cols-2 lg:grid-cols-4">{topicStats.map((s) => <div key={`${s.category}-${s.name}`} className="rounded-xl bg-white/5 p-3"><div className="text-sm font-bold">{s.name}</div><div className="text-xs text-white/45">{s.category}</div><div className="mt-1 text-lg font-black">{s.count}</div></div>)}</div></div>
       </div>
+      <section className="mt-5 rounded-[2rem] border border-cyan-200/20 bg-cyan-300/10 p-6 backdrop-blur-xl">
+        <div className="flex flex-wrap items-start justify-between gap-4"><div><p className="text-cyan-100">Admin Only</p><h2 className="text-3xl font-black">AI Content Studio</h2><p className="mt-2 max-w-3xl text-sm text-white/65">Generate draft questions, lessons, notes, strategies, and current-events content. Drafts are never available to students until an Admin approves and publishes them into the existing question bank or lesson library.</p></div><Pill>{aiDrafts.filter((d) => d.status === "Draft").length} question drafts</Pill></div>
+        {aiStudioMessage && <div className="mt-4 rounded-2xl border border-emerald-200/30 bg-emerald-300/10 p-3 text-sm text-emerald-100">{aiStudioMessage}</div>}
+        <div className="mt-5 grid gap-3 lg:grid-cols-5">
+          <label className="text-xs font-black uppercase tracking-wide text-cyan-100">Module<select value={aiStudioModule} onChange={(e) => setAiStudioModule(e.target.value)} className="mt-2 min-h-12 w-full rounded-2xl border border-white/10 bg-slate-900 px-3 text-sm text-white">{AI_STUDIO_MODULES.map((item) => <option key={item}>{item}</option>)}</select></label>
+          <label className="text-xs font-black uppercase tracking-wide text-cyan-100">Category<select value={aiStudioCategory} onChange={(e) => setAiStudioCategory(e.target.value)} className="mt-2 min-h-12 w-full rounded-2xl border border-white/10 bg-slate-900 px-3 text-sm text-white">{CATEGORIES.map((cat) => <option key={cat.name}>{cat.name}</option>)}</select></label>
+          <label className="text-xs font-black uppercase tracking-wide text-cyan-100">Topic<select value={aiStudioTopic} onChange={(e) => setAiStudioTopic(e.target.value)} className="mt-2 min-h-12 w-full rounded-2xl border border-white/10 bg-slate-900 px-3 text-sm text-white">{aiTopics.map((topic) => <option key={topic}>{topic}</option>)}</select></label>
+          <label className="text-xs font-black uppercase tracking-wide text-cyan-100">Difficulty<select value={aiStudioDifficulty} onChange={(e) => setAiStudioDifficulty(e.target.value)} className="mt-2 min-h-12 w-full rounded-2xl border border-white/10 bg-slate-900 px-3 text-sm text-white">{AI_DIFFICULTIES.map((item) => <option key={item}>{item}</option>)}</select></label>
+          <label className="text-xs font-black uppercase tracking-wide text-cyan-100">Count<select value={aiStudioCount} onChange={(e) => setAiStudioCount(Number(e.target.value))} className="mt-2 min-h-12 w-full rounded-2xl border border-white/10 bg-slate-900 px-3 text-sm text-white">{AI_COUNTS.map((item) => <option key={item}>{item}</option>)}</select></label>
+        </div>
+        <div className="mt-4 flex flex-wrap gap-3"><button onClick={generateAiStudioDrafts} className="rounded-2xl bg-white px-5 py-3 font-black text-slate-950">Generate Draft Content</button><button onClick={() => setAiStudioModule("AI Content Audit")} className="rounded-2xl border border-white/10 bg-white/10 px-5 py-3 font-bold">Open Content Audit</button></div>
+        <div className="mt-5 grid gap-4 lg:grid-cols-[1.2fr_.8fr]">
+          <div className="rounded-2xl bg-slate-950/45 p-4"><h3 className="mb-3 font-black">Draft Question Review Queue</h3><div className="max-h-[520px] space-y-3 overflow-auto pr-1">{!aiDrafts.length && <p className="text-sm text-white/55">No AI question drafts yet.</p>}{aiDrafts.map((draft) => <div key={draft.draftId} className="rounded-2xl border border-white/10 bg-white/5 p-4"><div className="mb-2 flex flex-wrap gap-2"><Pill>{draft.status}</Pill><Pill>{draft.category}</Pill><Pill>{draft.subCategory}</Pill><Pill>{draft.difficulty}</Pill></div><h4 className="font-black">{draft.question}</h4><div className="mt-3 grid gap-2 sm:grid-cols-2">{draft.choices.map((choice, idx) => <p key={`${draft.draftId}-${choice}`} className={`rounded-xl p-3 text-xs ${choice === draft.answer ? "bg-emerald-300/15 text-emerald-100" : "bg-slate-900/70 text-white/65"}`}>{choiceLetters[idx]}. {choice}</p>)}</div><p className="mt-3 text-sm leading-6 text-white/65">{draft.explanation}</p><p className="mt-2 text-xs text-amber-100">Audit: {draft.audit?.notes} {draft.audit?.duplicateQuestions?.length ? `Matches: ${draft.audit.duplicateQuestions.join(", ")}` : ""}</p><div className="mt-3 flex flex-wrap gap-2"><button onClick={() => approveAiQuestion(draft)} disabled={draft.status === "Approved"} className="rounded-xl bg-emerald-400/20 px-3 py-2 text-xs font-bold text-emerald-100 disabled:opacity-40">Approve & Publish</button><button onClick={() => editAiDraft(draft.draftId)} className="rounded-xl bg-cyan-400/20 px-3 py-2 text-xs font-bold text-cyan-100">Edit</button><button onClick={() => updateAiDraftStatus(draft.draftId, "Rejected")} className="rounded-xl bg-red-400/20 px-3 py-2 text-xs font-bold text-red-100">Reject</button><button onClick={() => updateAiDraftStatus(draft.draftId, "Archived")} className="rounded-xl bg-white/10 px-3 py-2 text-xs font-bold">Archive</button></div></div>)}</div></div>
+          <div className="space-y-4"><div className="rounded-2xl bg-slate-950/45 p-4"><h3 className="mb-3 font-black">Lesson / Notes Drafts</h3><div className="max-h-64 space-y-3 overflow-auto pr-1">{!aiLessons.length && <p className="text-sm text-white/55">No AI lesson drafts yet.</p>}{aiLessons.map((draft) => <div key={draft.id} className="rounded-2xl bg-white/5 p-4"><div className="flex flex-wrap gap-2"><Pill>{draft.status}</Pill><Pill>{draft.topic}</Pill></div><p className="mt-2 text-sm text-white/65">{draft.content.lessonContent?.[0]}</p><div className="mt-3 flex flex-wrap gap-2"><button onClick={() => approveAiLesson(draft)} disabled={draft.status === "Approved"} className="rounded-xl bg-emerald-400/20 px-3 py-2 text-xs font-bold text-emerald-100 disabled:opacity-40">Approve Lesson</button><button onClick={() => updateAiDraftStatus(draft.id, "Archived")} className="rounded-xl bg-white/10 px-3 py-2 text-xs font-bold">Archive</button></div></div>)}</div></div><div className="rounded-2xl bg-slate-950/45 p-4"><h3 className="mb-3 font-black">Content Audit</h3><div className="max-h-72 space-y-2 overflow-auto pr-1">{aiAuditRows.slice().sort((a, b) => a.questions - b.questions).slice(0, 12).map((row) => <div key={`${row.category}-${row.topic}`} className="rounded-xl bg-white/5 p-3 text-sm"><b>{row.topic}</b><p className="text-xs text-white/50">{row.category} - {row.questions} questions - supports about {row.mockCapacity} full topic mock sets</p>{row.repeated.length > 0 && <p className="mt-1 text-xs text-amber-100">Repeated distractor watch: {row.repeated.map(([text, count]) => `${text} (${count})`).join("; ")}</p>}</div>)}</div></div><div className="rounded-2xl border border-amber-200/20 bg-amber-300/10 p-4"><h3 className="font-black">Future Automation Plan</h3><p className="mt-2 text-sm leading-6 text-white/70">Suggested scheduled job: every Sunday, generate 20 Current Events, 20 Government, 20 Constitution, and 20 Logic drafts. Keep them in Draft status until Admin approval.</p></div></div>
+        </div>
+      </section>
       <div className="mt-5 grid gap-4 lg:grid-cols-2">
         <section className="rounded-[1.5rem] border border-amber-200/20 bg-amber-300/10 p-5 backdrop-blur-xl lg:col-span-2">
           <div className="flex flex-wrap items-start justify-between gap-4"><div><h3 className="text-xl font-black">Admin Approval Dashboard</h3><p className="mt-1 text-sm text-white/60">Review recently registered users, approve access, reject suspicious accounts, and monitor founding member slots.</p></div><input value={adminSearch} onChange={(e) => setAdminSearch(e.target.value)} placeholder="Search user" className="min-h-11 rounded-2xl border border-white/10 bg-slate-900 px-4 text-sm text-white" /></div>
@@ -2442,7 +2663,7 @@ export default function App() {
       ["Select Category", "Choose Verbal, Numerical, Analytical, or General Information from the dashboard selector."],
       ["Select Topic", "Pick an exact topic such as Vocabulary, Percentages, Logic, or RA 6713."],
       ["Open Learn Tab", "Read lessons, notes, strategies, tips, memory techniques, and practice examples."],
-      ["Take Topic Test", "Use the Test tab when you are ready to check understanding before mock exams."],
+      ["Open Test Tab", "Use the Test tab when you are ready to begin Mock Exam progression."],
       ["View Performance Tracker", "Use the tracker and heat map to see weak areas and study activity."],
       ["Start First Mock Exam", "Begin with Mock Exam 1 and unlock the next mock after passing the previous one."]
     ];

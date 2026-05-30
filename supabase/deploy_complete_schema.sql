@@ -61,17 +61,45 @@ create table if not exists public.question_bank (
   hint text,
   learning_tip text,
   source text not null default 'built-in',
+  status text not null default 'Approved',
+  tags jsonb not null default '[]'::jsonb,
+  date_generated timestamptz,
+  approved_by text,
+  approved_at timestamptz,
+  times_answered integer not null default 0,
+  correct_count integer not null default 0,
+  wrong_count integer not null default 0,
+  difficulty_score numeric not null default 0,
   created_at timestamptz not null default now(),
   constraint question_bank_four_choices check (jsonb_typeof(choices) = 'array' and jsonb_array_length(choices) >= 4)
 );
+
+alter table public.question_bank add column if not exists status text not null default 'Approved';
+alter table public.question_bank add column if not exists tags jsonb not null default '[]'::jsonb;
+alter table public.question_bank add column if not exists date_generated timestamptz;
+alter table public.question_bank add column if not exists approved_by text;
+alter table public.question_bank add column if not exists approved_at timestamptz;
+alter table public.question_bank add column if not exists times_answered integer not null default 0;
+alter table public.question_bank add column if not exists correct_count integer not null default 0;
+alter table public.question_bank add column if not exists wrong_count integer not null default 0;
+alter table public.question_bank add column if not exists difficulty_score numeric not null default 0;
 
 create table if not exists public.lessons (
   id text primary key,
   category text not null,
   topic text not null,
   content jsonb not null,
+  source text not null default 'built-in',
+  status text not null default 'Approved',
+  approved_by text,
+  approved_at timestamptz,
   created_at timestamptz not null default now()
 );
+
+alter table public.lessons add column if not exists source text not null default 'built-in';
+alter table public.lessons add column if not exists status text not null default 'Approved';
+alter table public.lessons add column if not exists approved_by text;
+alter table public.lessons add column if not exists approved_at timestamptz;
 
 create table if not exists public.mock_exams (
   id uuid primary key default gen_random_uuid(),
@@ -220,7 +248,9 @@ drop policy if exists "profiles update own safe fields" on public.user_profiles;
 drop policy if exists "profiles admin update" on public.user_profiles;
 drop policy if exists "progress own" on public.user_progress;
 drop policy if exists "question bank readable" on public.question_bank;
+drop policy if exists "question bank admin write" on public.question_bank;
 drop policy if exists "lessons readable" on public.lessons;
+drop policy if exists "lessons admin write" on public.lessons;
 drop policy if exists "mock exams own or admin" on public.mock_exams;
 drop policy if exists "bookmarks own" on public.bookmarks;
 drop policy if exists "analytics own or admin" on public.analytics;
@@ -257,10 +287,16 @@ create policy "progress own" on public.user_progress
 for all using (user_id = auth.uid()) with check (user_id = auth.uid());
 
 create policy "question bank readable" on public.question_bank
-for select using (true);
+for select using (status = 'Approved' or public.is_admin());
+
+create policy "question bank admin write" on public.question_bank
+for all using (public.is_admin()) with check (public.is_admin());
 
 create policy "lessons readable" on public.lessons
-for select using (true);
+for select using (status = 'Approved' or public.is_admin());
+
+create policy "lessons admin write" on public.lessons
+for all using (public.is_admin()) with check (public.is_admin());
 
 create policy "mock exams own or admin" on public.mock_exams
 for all using (user_id = auth.uid() or public.is_admin()) with check (user_id = auth.uid() or public.is_admin());
@@ -279,6 +315,7 @@ for all using (user_id = auth.uid() or public.is_admin()) with check (user_id = 
 
 grant usage on schema public to anon, authenticated;
 grant select on public.question_bank, public.lessons to anon, authenticated;
+grant insert, update, delete on public.question_bank, public.lessons to authenticated;
 grant select, insert, update, delete on
   public.users,
   public.user_profiles,
