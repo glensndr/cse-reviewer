@@ -2214,8 +2214,7 @@ export default function App() {
             explanation: row.explanation,
             hint: row.hint,
             learning_tip: row.learning_tip,
-            source: row.source,
-            status: row.status
+            source: row.source
           }));
           result = await supabase.from("question_bank").upsert(fallbackBatch, { onConflict: "id" }).select("*");
           if (result.error) {
