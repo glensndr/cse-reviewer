@@ -356,6 +356,15 @@ const mod = (n, m) => ((n % m) + m) % m;
 const pct = (a, b) => (b ? Math.round((a / b) * 100) : 0);
 const uid = (prefix, i) => `${prefix}-${String(i + 1).padStart(3, "0")}`;
 
+function hashText(text) {
+  let hash = 2166136261;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 16777619) >>> 0;
+  }
+  return hash;
+}
+
 function seededShuffle(items, seedText) {
   let seed = 0;
   for (let i = 0; i < seedText.length; i++) seed = (seed * 31 + seedText.charCodeAt(i)) >>> 0;
@@ -369,9 +378,7 @@ function seededShuffle(items, seedText) {
 }
 
 function arrangeChoices(choices, answer, id) {
-  const prefixOffset = { VA: 0, AA: 1, NA: 2, GI: 3 }[id.slice(0, 2)] || 0;
-  const number = Number(id.split("-")[1]) || 0;
-  const answerIndex = mod(number + prefixOffset, 4);
+  const answerIndex = hashText(`${id}|${answer}|cse-choice-slot`) % 4;
   const distractors = seededShuffle(choices.filter((choice) => choice !== answer), `${id}-distractors`);
   const arranged = [];
   let distractorIndex = 0;
@@ -1192,6 +1199,20 @@ function mergeUniqueQuestions(initial, candidates, count, seed) {
   return result;
 }
 
+function withBalancedAnswerPositions(questions, seed) {
+  const counts = [0, 0, 0, 0];
+  return questions.map((q, index) => {
+    const rankedSlots = [0, 1, 2, 3].sort((a, b) => counts[a] - counts[b] || hashText(`${seed}-${q.id}-${index}-${a}`) - hashText(`${seed}-${q.id}-${index}-${b}`));
+    const answerIndex = rankedSlots[0];
+    counts[answerIndex] += 1;
+    const distractors = seededShuffle(q.choices.filter((choice) => choice !== q.answer), `${seed}-${q.id}-distractors`);
+    const choices = [];
+    let distractorIndex = 0;
+    for (let slot = 0; slot < 4; slot++) choices.push(slot === answerIndex ? q.answer : distractors[distractorIndex++]);
+    return { ...q, choices };
+  });
+}
+
 function balancedMockQuestions(bank, mode, progress, count) {
   const categoryTargets = CATEGORIES.map((cat, idx) => ({ cat, count: mode === "Full Mock Exam" ? (idx === 3 ? 35 : 45) : Math.floor(count / CATEGORIES.length) + (idx < count % CATEGORIES.length ? 1 : 0) }));
   const picked = [];
@@ -1232,7 +1253,7 @@ function selectQuestions(category, mode, progress, subCategory = "All Topics", b
   const isTopicLevel = subCategory !== "All Topics";
   const isCategoryLevel = category !== "All Categories" && subCategory === "All Topics";
   if (mode === "Full Mock Exam") {
-    return balancedMockQuestions(bank, mode, progress, 170);
+    return withBalancedAnswerPositions(balancedMockQuestions(bank, mode, progress, 170), `${mode}-${Date.now()}`);
   }
   if (mode === "Wrong Drill") {
     const wrongIds = Object.entries(progress.answered || {})
@@ -1251,16 +1272,16 @@ function selectQuestions(category, mode, progress, subCategory = "All Topics", b
   const mockNumber = mockExamNumber(mode);
   const count = isTopicLevel ? 25 : isCategoryLevel ? 170 : mode === "Quick Review" ? 10 : mode === "Mini Quiz" ? 20 : mockNumber ? Math.min(170, 50 + (mockNumber - 1) * 12) : mode === "Timed Exam" ? 60 : mode === "Wrong Drill" ? 30 : mode === "Mastery Test" ? 50 : 25;
   if (mockNumber) {
-    if (category === "All Categories") return balancedMockQuestions(bank, mode, progress, count);
-    if (subCategory === "All Topics") return balancedCategoryQuestions(pool, mode, progress, count);
-    return uniqueSessionQuestions(pool, count, progress, `${mode}-${category}-${subCategory}-${Date.now()}`);
+    if (category === "All Categories") return withBalancedAnswerPositions(balancedMockQuestions(bank, mode, progress, count), `${mode}-all-${Date.now()}`);
+    if (subCategory === "All Topics") return withBalancedAnswerPositions(balancedCategoryQuestions(pool, mode, progress, count), `${mode}-${category}-${Date.now()}`);
+    return withBalancedAnswerPositions(uniqueSessionQuestions(pool, count, progress, `${mode}-${category}-${subCategory}-${Date.now()}`), `${mode}-${category}-${subCategory}-${Date.now()}`);
   }
   let selected = uniqueSessionQuestions(pool, count, progress, `${mode}-${category}-${subCategory}-${Date.now()}`);
   if (selected.length < count && subCategory !== "All Topics") {
     const fallback = bank.filter((q) => q.category === category && q.subCategory !== subCategory);
     selected = mergeUniqueQuestions(selected, fallback, count, `${mode}-${category}-fallback-${Date.now()}`);
   }
-  return selected.slice(0, count);
+  return withBalancedAnswerPositions(selected.slice(0, count), `${mode}-${category}-${subCategory}-${Date.now()}`);
 }
 
 function categorizeText(text) {
@@ -1451,7 +1472,7 @@ export default function App() {
   const [screen, setScreen] = useState("dashboard");
   const [category, setCategory] = useState("All Categories");
   const [subCategory, setSubCategory] = useState("All Topics");
-  const [mode, setMode] = useState("Mastery Test");
+  const [mode, setMode] = useState("Mini Quiz");
   const [exam, setExam] = useState(null);
   const [reviewFilter, setReviewFilter] = useState("All");
   const [learningTab, setLearningTab] = useState("Learn");
@@ -1718,7 +1739,7 @@ export default function App() {
   }, [progress, authSession?.user?.id, cloudLoading]);
 
   function resetProgress() {
-    if (!window.confirm("Reset all saved scores, XP, progress, and weakness analytics for this cloud account?")) return;
+    if (!window.confirm("Are you sure you want to reset your scores?\n\nThis action cannot be undone.")) return;
     setProgress(initialProgress);
     setExam(null);
     setScreen("dashboard");
@@ -1933,11 +1954,11 @@ export default function App() {
       if (mockExamNumber(nextMode) && !isMockUnlocked(progress, nextMode)) return;
       startExam(category, nextMode, subCategory);
     };
-    return <section className="mt-6 rounded-[1.5rem] border border-white/10 bg-white/[.07] p-5 backdrop-blur-xl">
+    return <section id="review-center" className="mt-6 rounded-[1.5rem] border border-white/10 bg-white/[.07] p-5 backdrop-blur-xl">
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <div><h3 className="text-xl font-black">Review Center</h3><p className="mt-1 text-sm text-white/55">This center follows your selected category and topic.</p></div>
-        <div className="rounded-2xl border border-white/10 bg-slate-950/45 p-1">
-          {["Learn", "Test"].map((tab) => <button key={tab} onClick={() => setLearningTab(tab)} className={`rounded-xl px-4 py-2 text-sm font-black ${learningTab === tab ? "bg-white text-slate-950" : "text-white/65"}`}>{tab}</button>)}
+        <div className="grid w-full gap-2 rounded-3xl border border-white/10 bg-slate-950/60 p-2 sm:w-auto sm:grid-cols-2">
+          {[["Learn", "📚 LEARN"], ["Test", "📝 TEST"]].map(([tab, label]) => <button key={tab} onClick={() => setLearningTab(tab)} className={`min-h-12 rounded-2xl px-6 text-base font-black tracking-wide transition sm:min-w-36 ${learningTab === tab ? "bg-gradient-to-r from-emerald-300 to-cyan-300 text-slate-950 shadow-glow" : "bg-white/10 text-white/75 hover:bg-white/15"}`}>{label}</button>)}
         </div>
       </div>
       {!hasSelection && <div className="rounded-2xl bg-slate-900/45 p-6 text-center text-white/70">Select a category or topic to start learning.</div>}
@@ -1948,8 +1969,10 @@ export default function App() {
         {[["Actual Lesson Content", topicReview.lessons], ["Topic Definitions", topicReview.definitions], ["Core Concepts", topicReview.concepts], ["Rules / Formulas", topicReview.rules], ["Examples", topicReview.examples], ["Worked Solutions", topicReview.worked], ["Topic-Specific Tips", topicReview.tips], ["Common Mistakes", topicReview.mistakes], ["Exam Patterns", topicReview.patterns], ["Memory Aids", topicReview.memory], ["Most Missed Questions", stats.subStats.find((s) => s.name === subCategory)?.wrong ? [`You have missed ${stats.subStats.find((s) => s.name === subCategory)?.wrong} item(s) in this topic. Use Wrong Drill until corrected.`] : [`No missed ${subCategory} questions recorded yet.`]]].map(([title, rows]) => <div key={title} className="rounded-2xl bg-slate-900/45 p-4"><h4 className="font-black">{title}</h4>{rows.map((row) => <p key={row} className="mt-2 text-sm leading-7 text-white/65">{row}</p>)}</div>)}
       </div>}
       {hasSelection && learningTab === "Test" && <div className="space-y-5">
-        <div className="grid gap-3 sm:grid-cols-2">
-          {["Mastery Test", "Wrong Drill"].map((nextMode) => <button key={nextMode} onClick={() => run(nextMode)} className={`inline-flex min-h-12 items-center justify-center gap-2 rounded-2xl px-5 font-bold transition ${hasSelection ? primaryClass : disabledClass}`}><Play className="h-4 w-4" />{nextMode}</button>)}
+        <div className="rounded-2xl bg-slate-900/45 p-4">
+          <h4 className="font-black">Topic Test</h4>
+          <p className="mt-2 text-sm text-white/60">Start a focused 25-question test for the selected category or topic before moving into mock exams.</p>
+          <button onClick={() => run("Mini Quiz")} className={`mt-4 inline-flex min-h-12 items-center justify-center gap-2 rounded-2xl px-5 font-bold transition ${hasSelection ? primaryClass : disabledClass}`}><Play className="h-4 w-4" />Start Topic Test</button>
         </div>
         <div className="rounded-2xl bg-slate-900/45 p-4"><h4 className="mb-3 font-black">Mock Exam Progression</h4><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">{MOCK_EXAM_MODES.map((nextMode) => {
           const unlocked = isMockUnlocked(progress, nextMode);
@@ -1969,18 +1992,22 @@ export default function App() {
       if (!hasSelection || (mockExamNumber(nextMode) && !isMockUnlocked(progress, nextMode))) return;
       startExam(category, nextMode, subCategory);
     };
+    const openReviewCenter = () => {
+      setLearningTab("Learn");
+      if (typeof document !== "undefined") document.getElementById("review-center")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    };
     return (
     <div className="mx-auto max-w-7xl px-4 py-8">
       <section className="mb-6 rounded-[1.5rem] border border-emerald-200/20 bg-emerald-300/10 p-5 backdrop-blur-xl">
         <div className="flex flex-wrap items-start justify-between gap-4">
-          <div><h2 className="text-xl font-black">How to Use CSE Mastery</h2><p className="mt-2 max-w-4xl text-sm leading-7 text-white/70">Step 1: Select Category. Step 2: Select Topic. Step 3: Study in Learn Tab. Step 4: Take Mastery Test. Step 5: Use Wrong Drill. Step 6: Progress through Mock Exam 1 to Mock Exam 10. Step 7: Take the Full CSE Simulation.</p></div>
+          <div><h2 className="text-xl font-black">How to Use CSE Mastery</h2><p className="mt-2 max-w-4xl text-sm leading-7 text-white/70">Step 1: Select Category. Step 2: Select Topic. Step 3: Study in Learn Tab. Step 4: Take Topic Test. Step 5: Use Wrong Drill from Study Tools. Step 6: Progress through Mock Exam 1 to Mock Exam 10. Step 7: Take the Full CSE Simulation.</p></div>
           <button onClick={() => { setTourStep(0); setShowTour(true); }} className="rounded-2xl bg-white px-5 py-3 font-black text-slate-950">Open Guide</button>
         </div>
       </section>
       <div className="grid gap-4 lg:grid-cols-[1.35fr_.65fr]">
         <motion.section initial={false} animate={{ opacity: 1, y: 0 }} className="overflow-hidden rounded-[2rem] border border-white/10 bg-white/[.08] p-6 shadow-2xl backdrop-blur-xl">
           <div className="flex flex-wrap items-start justify-between gap-4">
-            <div><p className="mb-2 text-sm font-semibold text-emerald-200">Premium CBT mastery trainer</p><h2 className="max-w-3xl text-3xl font-black leading-tight sm:text-5xl">Master one topic at a time, then face the exam with calm precision.</h2></div>
+            <div><p className="mb-2 text-sm font-semibold text-emerald-200">Premium CBT mastery trainer</p><h2 className="max-w-3xl text-2xl font-black leading-tight sm:text-4xl">Master one topic at a time, then face the exam with calm precision.</h2></div>
             <Ring value={stats.accuracy} label="Accuracy" />
           </div>
           <div className="mt-8 grid gap-3 sm:grid-cols-4">
@@ -2002,14 +2029,13 @@ export default function App() {
             </label>
           </div>
           <div className="mt-4 flex flex-wrap gap-3">
-            {["Mastery Test", "Wrong Drill"].map((m) => <button key={m} disabled={!hasSelection} onClick={() => startIfAllowed(m)} className={`inline-flex min-h-12 items-center gap-2 rounded-2xl px-5 font-bold transition ${hasSelection ? "bg-white text-slate-950 hover:scale-[1.02]" : "cursor-not-allowed border border-white/10 bg-white/5 text-white/35"}`}><Play className="h-4 w-4" />{m}</button>)}
-            <button onClick={resetProgress} className="inline-flex min-h-12 items-center gap-2 rounded-2xl border border-red-200/30 bg-red-400/15 px-5 font-bold text-red-100 transition hover:bg-red-400/25"><RotateCcw className="h-4 w-4" />Reset Scores</button>
+            <button onClick={openReviewCenter} className="inline-flex min-h-12 items-center gap-2 rounded-2xl bg-white px-5 font-black text-slate-950 transition hover:scale-[1.02]"><BookOpen className="h-4 w-4" />📚 Review Center</button>
           </div>
         </motion.section>
         <section className="rounded-[2rem] border border-white/10 bg-white/[.08] p-5 backdrop-blur-xl">
           <h3 className="mb-4 flex items-center gap-2 text-lg font-black"><Lightbulb className="text-yellow-200" /> Smart recommendations</h3>
           <div className="space-y-3 text-sm text-white/75">
-            <p>{stats.weakest ? `You need more practice in ${stats.weakest.name}. Current accuracy is ${stats.weakest.accuracy}%.` : "Start with a topic Mastery Test to establish your first diagnostic baseline."}</p>
+            <p>{stats.weakest ? `You need more practice in ${stats.weakest.name}. Current accuracy is ${stats.weakest.accuracy}%.` : "Start in the Review Center to establish your first diagnostic baseline."}</p>
             <p>{stats.strongest ? `Your strongest sub-category is ${stats.strongest.name} at ${stats.strongest.accuracy}% accuracy.` : "Your strongest category will appear after a few answered items."}</p>
             <p>{progress.sessions.length >= 2 ? `Your latest exam trend is ${progress.sessions.at(-1).accuracy - progress.sessions.at(-2).accuracy >= 0 ? "improving" : "dipping"} by ${Math.abs(progress.sessions.at(-1).accuracy - progress.sessions.at(-2).accuracy)}%.` : "Complete a timed exam to unlock improvement trend insights."}</p>
             <p>Exam Readiness Score: {readiness.score}%. Status: {readiness.status}.</p>
@@ -2053,6 +2079,14 @@ export default function App() {
           {stats.subStats.slice(0, 25).map((s) => <div key={s.name} title={`${s.name}: ${s.accuracy}%`} className={`aspect-square rounded-xl ${s.accuracy >= 80 ? "bg-emerald-400" : s.accuracy >= 60 ? "bg-yellow-300" : "bg-red-400"}`} />)}
           {!stats.subStats.length && Array.from({ length: 25 }, (_, i) => <div key={i} className="aspect-square rounded-xl bg-white/10" />)}
         </div>
+      </div>
+      <div className="rounded-[1.5rem] border border-white/10 bg-white/[.07] p-5 backdrop-blur-xl lg:col-span-3">
+        <h3 className="mb-4 flex items-center gap-2 text-lg font-black"><ListFilter className="text-cyan-200" /> Study Tools</h3>
+        <div className="flex flex-wrap gap-3">
+          <button disabled={category === "All Categories" && subCategory === "All Topics"} onClick={() => startExam(category, "Wrong Drill", subCategory)} className={`inline-flex min-h-12 items-center gap-2 rounded-2xl px-5 font-bold ${category !== "All Categories" || subCategory !== "All Topics" ? "bg-white text-slate-950" : "cursor-not-allowed border border-white/10 bg-white/5 text-white/35"}`}><ListFilter className="h-4 w-4" />Wrong Drill</button>
+          <button onClick={resetProgress} className="inline-flex min-h-12 items-center gap-2 rounded-2xl border border-red-200/30 bg-red-400/15 px-5 font-bold text-red-100 transition hover:bg-red-400/25"><RotateCcw className="h-4 w-4" />Reset Scores</button>
+        </div>
+        <p className="mt-3 text-xs text-white/50">Wrong Drill repeats missed items for correction. Reset Scores is kept here to avoid accidental dashboard clicks.</p>
       </div>
       <div className="rounded-[1.5rem] border border-white/10 bg-white/[.07] p-5 backdrop-blur-xl lg:col-span-3">
         <h3 className="mb-4 flex items-center gap-2 text-lg font-black"><BookOpen className="text-emerald-200" /> Review Library</h3>
@@ -2151,7 +2185,7 @@ export default function App() {
     }).filter(Boolean);
     const answerRows = exam ? exam.questions.map((q) => exam.answers[q.id] || { selected: null, status: "unanswered", time: 0, question: q }) : [...savedRows, ...bookmarkRows];
     const rows = answerRows.filter((a) => reviewFilter === "All" || (reviewFilter === "Bookmarked" ? progress.bookmarks?.[a.question.id] : a.status === reviewFilter.toLowerCase()));
-    return <div className="mx-auto max-w-6xl px-4 py-8"><div className="mb-4 flex flex-wrap justify-between gap-3"><h2 className="text-2xl font-black">Smart Review Center</h2><div className="flex flex-wrap gap-2">{["All", "Correct", "Wrong", "Skipped", "Unanswered", "Bookmarked"].map((f) => <button key={f} onClick={() => setReviewFilter(f)} className={`rounded-xl px-4 py-2 text-sm font-bold ${reviewFilter === f ? "bg-white text-slate-950" : "bg-white/10"}`}>{f}</button>)}</div></div><section className="mb-5 grid gap-4 lg:grid-cols-3"><div className="rounded-2xl border border-white/10 bg-white/[.07] p-5"><h3 className="font-black">Weakest Topics</h3>{weakestTopics.map((s) => <p key={s.name} className="mt-2 text-sm text-white/65">{s.name}: {s.accuracy}%</p>)}{!weakestTopics.length && <p className="mt-2 text-sm text-white/55">Answer more questions to unlock weak topic analysis.</p>}</div><div className="rounded-2xl border border-white/10 bg-white/[.07] p-5"><h3 className="font-black">Most Improved Topics</h3>{improvedTopics.map((s) => <p key={s.name} className="mt-2 text-sm text-emerald-100">{s.name}: +{s.trend}%</p>)}{!improvedTopics.length && <p className="mt-2 text-sm text-white/55">Recent improvement trends appear after more attempts.</p>}</div><div className="rounded-2xl border border-white/10 bg-white/[.07] p-5"><h3 className="font-black">Mock Exam Readiness</h3><p className="mt-2 text-sm text-white/65">Readiness Score: {readiness.score}%</p><p className="mt-2 text-sm text-white/65">Recommended next topic: {recommendedTopic}</p><p className="mt-2 text-xs text-white/45">Strong areas: {strongTopics.map((s) => s.name).join(", ") || "Not enough data yet"}</p></div><div className="rounded-2xl border border-white/10 bg-white/[.07] p-5 lg:col-span-3"><h3 className="font-black">Daily Study Plan</h3><p className="mt-2 text-sm text-white/65">Review {recommendedTopic}, answer a Quick Review, then take a Mini Quiz. If accuracy reaches 80%, proceed to Mastery Test.</p><div className="mt-4 flex flex-wrap gap-3"><button onClick={() => startExam(recommendedCategory, "Quick Review", recommendedTopic)} className="rounded-2xl bg-white px-5 py-3 font-bold text-slate-950">Quick Review: 10 Questions</button><button onClick={() => startExam(recommendedCategory, "Mini Quiz", recommendedTopic)} className="rounded-2xl bg-emerald-300 px-5 py-3 font-black text-slate-950">Mini Quiz: 20 Questions</button><button onClick={() => startExam(recommendedCategory, "Mastery Test", recommendedTopic)} className="rounded-2xl border border-white/10 bg-white/10 px-5 py-3 font-bold">Mastery Test: 50 Questions</button></div></div></section><div className="space-y-4">{rows.map((a) => <div key={a.question.id} className="rounded-2xl border border-white/10 bg-white/[.07] p-5"><div className="mb-2 flex flex-wrap gap-2"><Pill>{a.status}</Pill><Pill>{a.question.category}</Pill><Pill>{a.question.subCategory}</Pill>{progress.bookmarks?.[a.question.id] && <Pill>Bookmarked</Pill>}</div><h3 className="font-black">{a.question.question}</h3><p className="mt-2 text-sm text-white/65">Your answer: <b>{a.selected || "Skipped"}</b> • Correct answer: <b className="text-emerald-200">{a.question.answer}</b></p><p className="mt-3 text-sm leading-7 text-white/70">{a.question.explanation}</p><div className="mt-3 grid gap-2">{a.question.choices.map((choice, idx) => <p key={choice} className="rounded-xl bg-white/5 p-3 text-xs text-white/60">{choiceInsight(a.question, choice, idx)}</p>)}</div><p className="mt-2 text-sm text-cyan-100"><b>Tip:</b> {a.question.learningTip}</p></div>)}</div></div>;
+    return <div className="mx-auto max-w-6xl px-4 py-8"><div className="mb-4 flex flex-wrap justify-between gap-3"><h2 className="text-2xl font-black">Smart Review Center</h2><div className="flex flex-wrap gap-2">{["All", "Correct", "Wrong", "Skipped", "Unanswered", "Bookmarked"].map((f) => <button key={f} onClick={() => setReviewFilter(f)} className={`rounded-xl px-4 py-2 text-sm font-bold ${reviewFilter === f ? "bg-white text-slate-950" : "bg-white/10"}`}>{f}</button>)}</div></div><section className="mb-5 grid gap-4 lg:grid-cols-3"><div className="rounded-2xl border border-white/10 bg-white/[.07] p-5"><h3 className="font-black">Weakest Topics</h3>{weakestTopics.map((s) => <p key={s.name} className="mt-2 text-sm text-white/65">{s.name}: {s.accuracy}%</p>)}{!weakestTopics.length && <p className="mt-2 text-sm text-white/55">Answer more questions to unlock weak topic analysis.</p>}</div><div className="rounded-2xl border border-white/10 bg-white/[.07] p-5"><h3 className="font-black">Most Improved Topics</h3>{improvedTopics.map((s) => <p key={s.name} className="mt-2 text-sm text-emerald-100">{s.name}: +{s.trend}%</p>)}{!improvedTopics.length && <p className="mt-2 text-sm text-white/55">Recent improvement trends appear after more attempts.</p>}</div><div className="rounded-2xl border border-white/10 bg-white/[.07] p-5"><h3 className="font-black">Mock Exam Readiness</h3><p className="mt-2 text-sm text-white/65">Readiness Score: {readiness.score}%</p><p className="mt-2 text-sm text-white/65">Recommended next topic: {recommendedTopic}</p><p className="mt-2 text-xs text-white/45">Strong areas: {strongTopics.map((s) => s.name).join(", ") || "Not enough data yet"}</p></div><div className="rounded-2xl border border-white/10 bg-white/[.07] p-5 lg:col-span-3"><h3 className="font-black">Daily Study Plan</h3><p className="mt-2 text-sm text-white/65">Review {recommendedTopic}, answer a Quick Review, then take a Mini Quiz. If accuracy reaches 80%, proceed to Mock Exam 1.</p><div className="mt-4 flex flex-wrap gap-3"><button onClick={() => startExam(recommendedCategory, "Quick Review", recommendedTopic)} className="rounded-2xl bg-white px-5 py-3 font-bold text-slate-950">Quick Review: 10 Questions</button><button onClick={() => startExam(recommendedCategory, "Mini Quiz", recommendedTopic)} className="rounded-2xl bg-emerald-300 px-5 py-3 font-black text-slate-950">Mini Quiz: 20 Questions</button></div></div></section><div className="space-y-4">{rows.map((a) => <div key={a.question.id} className="rounded-2xl border border-white/10 bg-white/[.07] p-5"><div className="mb-2 flex flex-wrap gap-2"><Pill>{a.status}</Pill><Pill>{a.question.category}</Pill><Pill>{a.question.subCategory}</Pill>{progress.bookmarks?.[a.question.id] && <Pill>Bookmarked</Pill>}</div><h3 className="font-black">{a.question.question}</h3><p className="mt-2 text-sm text-white/65">Your answer: <b>{a.selected || "Skipped"}</b> • Correct answer: <b className="text-emerald-200">{a.question.answer}</b></p><p className="mt-3 text-sm leading-7 text-white/70">{a.question.explanation}</p><div className="mt-3 grid gap-2">{a.question.choices.map((choice, idx) => <p key={choice} className="rounded-xl bg-white/5 p-3 text-xs text-white/60">{choiceInsight(a.question, choice, idx)}</p>)}</div><p className="mt-2 text-sm text-cyan-100"><b>Tip:</b> {a.question.learningTip}</p></div>)}</div></div>;
   };
 
   const Learn = () => {
@@ -2178,7 +2212,7 @@ export default function App() {
         <div className="grid gap-4 md:grid-cols-2">
           {[["Examples", activeLesson.examples], ["Common Mistakes", activeLesson.commonMistakes], ["Step-by-Step Guide", activeLesson.stepGuide], ["Test-Taking Techniques", activeLesson.techniques], ["Civil Service Exam Tips", activeLesson.tips], ["Do's and Don'ts", [...activeLesson.dos.map((x) => `Do: ${x}`), ...activeLesson.donts.map((x) => `Don't: ${x}`)]]].map(([title, rows]) => <div key={title} className="rounded-2xl bg-slate-900/45 p-4"><h3 className="mb-2 font-black">{title}</h3>{rows.map((row) => <p key={row} className="mb-2 text-sm text-white/65">{row}</p>)}</div>)}
         </div>
-        <div className="mt-5 flex flex-wrap gap-3"><button onClick={() => startExam(activeLesson.category, "Mini Quiz", activeLesson.topic)} className="rounded-2xl bg-white px-5 py-3 font-bold text-slate-950">20-Question Mini Quiz</button><button onClick={() => startExam(activeLesson.category, "Mastery Test", activeLesson.topic)} className="rounded-2xl border border-white/10 bg-white/10 px-5 py-3 font-bold">Mastery Test</button></div>
+        <div className="mt-5 flex flex-wrap gap-3"><button onClick={() => startExam(activeLesson.category, "Mini Quiz", activeLesson.topic)} className="rounded-2xl bg-white px-5 py-3 font-bold text-slate-950">20-Question Topic Test</button></div>
       </section>
     </div>;
   };
@@ -2271,7 +2305,7 @@ export default function App() {
       ["Select Category", "Choose Verbal, Numerical, Analytical, or General Information from the dashboard selector."],
       ["Select Topic", "Pick an exact topic such as Vocabulary, Percentages, Logic, or RA 6713."],
       ["Open Learn Tab", "Read lessons, notes, strategies, tips, memory techniques, and practice examples."],
-      ["Take Mastery Test", "Use the Test tab when you are ready to measure topic mastery."],
+      ["Take Topic Test", "Use the Test tab when you are ready to check understanding before mock exams."],
       ["View Performance Tracker", "Use the tracker and heat map to see weak areas and study activity."],
       ["Start First Mock Exam", "Begin with Mock Exam 1 and unlock the next mock after passing the previous one."]
     ];
@@ -2295,6 +2329,8 @@ export default function App() {
     </div>
   );
 }
+
+
 
 
 
