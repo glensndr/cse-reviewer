@@ -180,6 +180,169 @@ const NUMERICAL_LESSON_DETAILS = {
   }
 };
 
+const TOPIC_REVIEW_CONTENT = {
+  "Grammar and Correct Usage": {
+    lessons: ["Grammar questions test whether a sentence follows standard English rules used in formal government communication.", "Focus on subject-verb agreement, pronoun reference, tense consistency, modifier placement, parallel structure, and clear syntax."],
+    definitions: ["Subject: the person or thing doing or being described.", "Verb: the action or state of being.", "Modifier: a word or phrase that describes another word and must be placed near what it modifies."],
+    concepts: ["Singular subjects take singular verbs; plural subjects take plural verbs.", "Pronouns must clearly refer to a specific noun and match it in number and person.", "Parallel ideas must use the same grammatical form."],
+    rules: ["Ignore interrupting phrases when matching subject and verb.", "Keep verb tense consistent unless the time frame changes.", "Use objective pronouns after prepositions: for him, with her, to them."],
+    examples: ["Correct: The committee approves the report.", "Correct: The employees submitted their forms on time.", "Incorrect: Each of the clerks have a copy."],
+    worked: ["Item: Each of the applicants ___ required to submit an ID. Solution: The subject is Each, which is singular. Answer: is."],
+    tips: ["Find the true subject before choosing the verb.", "Check pronoun reference when two nouns appear in one sentence.", "For lists, test whether each item follows the same pattern."],
+    mistakes: ["Matching the verb with the nearest noun instead of the real subject.", "Changing tense midway through a sentence.", "Using they/their when the noun is singular and the sentence needs formal agreement."],
+    patterns: ["Error identification items with underlined sentence parts.", "Best correction items for formal office sentences.", "Sentence completion items where grammar and meaning both matter."],
+    memory: ["S-V-P: Subject first, Verb match, Pronoun clear."]
+  },
+  Vocabulary: {
+    lessons: ["Vocabulary items measure precise word meaning in civil service contexts such as reports, memoranda, and public advisories.", "You must choose the word that best fits tone, context, and official meaning."],
+    definitions: ["Denotation: the literal dictionary meaning.", "Connotation: the emotional or formal association of a word.", "Context clue: nearby information that reveals meaning."],
+    concepts: ["Formal public-service writing favors exact and neutral words.", "A word can be correct in meaning but wrong in tone.", "Context clues may show contrast, cause, example, or definition."],
+    rules: ["Read the full sentence before checking choices.", "Replace the blank with each option and test meaning plus tone.", "Use prefixes and roots when the word is unfamiliar."],
+    examples: ["Prudent means careful and wise.", "Impartial means fair and unbiased.", "Expedite means to make a process faster."],
+    worked: ["Item: The officer must remain impartial. Solution: In a complaint setting, impartial means not favoring either side. Answer: unbiased."],
+    tips: ["Watch government words: accountable, transparent, prudent, equitable, comply.", "Eliminate words that are too emotional for official writing.", "Use contrast clues after however, although, despite, or but."],
+    mistakes: ["Choosing a familiar word without checking context.", "Confusing similar words such as imply/infer or affect/effect.", "Ignoring whether the sentence needs a positive or negative meaning."],
+    patterns: ["Synonym selection.", "Best word in a formal sentence.", "Meaning from context in short public-service passages."],
+    memory: ["MCT: Meaning, Context, Tone."]
+  },
+  Synonyms: {
+    lessons: ["Synonym items ask for the word closest in meaning, not always exactly identical.", "The best synonym must match the sentence context and level of formality."],
+    definitions: ["Synonym: a word with the same or nearly the same meaning.", "Register: the level of formality of a word."],
+    concepts: ["Near-synonyms differ in strength, tone, and usage.", "Civil service items often use formal words found in memoranda and policies."],
+    rules: ["Define the target word in your own words first.", "Check if the choice has the same positive, negative, or neutral sense.", "Avoid choices that are related but not equivalent."],
+    examples: ["Diligent = hardworking.", "Concise = brief but complete.", "Comply = obey or follow."],
+    worked: ["Item: Choose the synonym of transparent. Solution: In governance, transparent means open and clear. Answer: open."],
+    tips: ["Look for root clues: bene means good, mal means bad, trans means across or clear.", "Prefer the closest meaning over the most impressive word."],
+    mistakes: ["Choosing an antonym because it looks familiar.", "Choosing a word from the same topic but different meaning.", "Ignoring whether the word is used as noun, verb, or adjective."],
+    patterns: ["Single-word synonym questions.", "Sentence-based synonym questions.", "Formal governance vocabulary questions."],
+    memory: ["Same sense, same tone, same use."]
+  },
+  Antonyms: {
+    lessons: ["Antonym items ask for the opposite meaning of a target word.", "The correct answer must oppose the exact sense used in the item."],
+    definitions: ["Antonym: a word with opposite meaning.", "Polarity: whether a word has positive, negative, or neutral force."],
+    concepts: ["Some words have more than one opposite depending on context.", "Prefixes can signal opposition: un-, in-, im-, dis-, non-."],
+    rules: ["State the target word meaning first, then reverse it.", "Check if the choice is truly opposite, not merely different.", "Use sentence context when the target word has multiple meanings."],
+    examples: ["Transparent vs secretive.", "Diligent vs negligent.", "Scarce vs abundant."],
+    worked: ["Item: Antonym of impartial. Solution: Impartial means fair and unbiased; the opposite is biased."],
+    tips: ["Watch negative prefixes, but verify the resulting word exists and fits.", "Eliminate neutral alternatives that do not oppose the target."],
+    mistakes: ["Selecting a synonym instead of an antonym.", "Choosing a weaker related word, not the true opposite.", "Forgetting that some antonyms change by context."],
+    patterns: ["Direct antonym items.", "Antonym in sentence context.", "Public ethics vocabulary opposites."],
+    memory: ["Define, flip, verify."]
+  },
+  "Sentence Completion": {
+    lessons: ["Sentence completion tests grammar, vocabulary, logic, and tone in one item.", "The correct word or phrase must complete the thought without creating grammar or meaning errors."],
+    definitions: ["Signal word: a word like however, therefore, although, or because that shows sentence logic.", "Collocation: words that naturally go together."],
+    concepts: ["Contrast signals require an opposite idea.", "Cause-effect signals require a logical result.", "Formal sentences require precise and professional wording."],
+    rules: ["Read before and after the blank.", "Identify whether the sentence needs contrast, cause, example, or continuation.", "Check grammar after inserting the choice."],
+    examples: ["Although the request was urgent, the officer remained prudent.", "The form was incomplete; therefore, it was returned."],
+    worked: ["Item: The policy was implemented to ___ delays. Solution: The sentence needs a verb meaning reduce or prevent. Answer: minimize."],
+    tips: ["Underline signal words before looking at choices.", "Reject choices that sound grammatical but break the logic.", "Prefer formal wording in official contexts."],
+    mistakes: ["Choosing the longest option.", "Ignoring the second half of the sentence.", "Missing contrast words such as despite or although."],
+    patterns: ["One-blank vocabulary completion.", "Grammar-based completion.", "Logic connector completion."],
+    memory: ["Signal, sense, sentence."]
+  },
+  "Reading Comprehension": {
+    lessons: ["Reading comprehension measures whether you can identify what a passage says, implies, and supports.", "Civil service passages often discuss governance, service delivery, ethics, environment, or workplace situations."],
+    definitions: ["Main idea: the central point of the passage.", "Inference: a conclusion supported by the passage but not directly stated.", "Tone: the writer's attitude."],
+    concepts: ["Main idea is broader than a detail but narrower than an unrelated theme.", "Inference must be based on evidence, not personal opinion.", "Supporting details prove or explain the main idea."],
+    rules: ["Read the question first if time is limited.", "Locate evidence lines before answering.", "For inference, ask what must be true based on the passage."],
+    examples: ["If a passage lists benefits of online filing, the main idea may be improved service efficiency.", "A cautious tone uses words like may, should, risks, or requires."],
+    worked: ["Item: What is the main idea of a passage about reducing queue time? Solution: Combine repeated details about faster processing and citizen convenience. Answer: improved public service efficiency."],
+    tips: ["Eliminate choices that are true but too narrow.", "Avoid choices that add information not in the passage.", "Tone is usually neutral, informative, critical, or encouraging."],
+    mistakes: ["Answering from stock knowledge instead of the passage.", "Choosing a detail as the main idea.", "Treating a possible idea as a required inference."],
+    patterns: ["Main idea questions.", "Context clue vocabulary.", "Inference and tone questions.", "Supporting detail checks."],
+    memory: ["E-B-A: Evidence before answer."]
+  },
+  "Paragraph Organization": {
+    lessons: ["Paragraph organization tests whether sentences follow a logical order.", "You must identify the introduction, development, transitions, and conclusion."],
+    definitions: ["Topic sentence: introduces the main idea.", "Transition: connects one idea to another.", "Concluding sentence: closes or summarizes the paragraph."],
+    concepts: ["General statements usually come before specific examples.", "Pronouns and transition words depend on earlier sentences.", "Conclusions often restate the main point or give a final result."],
+    rules: ["Find the sentence that introduces the topic without needing prior context.", "Place examples after the idea they explain.", "Use pronoun clues: this, these, such, it, they."],
+    examples: ["First: Online services reduce waiting time. Next: Citizens can submit forms through a portal. Last: Thus, digital processing improves access."],
+    worked: ["Item: Which sentence should come first? Solution: Choose the sentence that names the topic and does not refer to earlier details."],
+    tips: ["Look for chronological words: first, next, finally.", "Find cause before effect.", "Put definitions before examples."],
+    mistakes: ["Starting with a sentence that says this or therefore.", "Putting a conclusion before evidence.", "Ignoring repeated keywords."],
+    patterns: ["Arrange sentences in logical order.", "Best introductory sentence.", "Best concluding statement."],
+    memory: ["G-E-C: General, Evidence, Conclusion."]
+  },
+  "Verbal Reasoning": {
+    lessons: ["Verbal reasoning asks you to evaluate meaning, relationships, and conclusions expressed in words.", "It combines vocabulary, logic, and careful reading."],
+    definitions: ["Claim: a statement being asserted.", "Evidence: support for a claim.", "Conclusion: the idea that follows from evidence."],
+    concepts: ["A conclusion must be supported by the given words.", "A strong answer does not add outside assumptions.", "Word relationships can show cause, category, function, or contrast."],
+    rules: ["Separate facts from opinions.", "Identify the exact claim before choosing a conclusion.", "Reject choices that exaggerate the statement."],
+    examples: ["If all applicants submitted IDs, it follows each applicant has an ID on file.", "If some offices use online forms, it does not mean all offices do."],
+    worked: ["Item: All valid permits have signatures. This permit has no signature. Solution: It cannot be a valid permit under the rule."],
+    tips: ["Watch quantifiers: all, some, none, most.", "Do not convert some into all.", "Use only the information given."],
+    mistakes: ["Adding real-world assumptions.", "Confusing probable with certain.", "Ignoring limiting words."],
+    patterns: ["Best conclusion.", "Statement implication.", "Meaning relationship items."],
+    memory: ["Words given, logic proven."]
+  }
+};
+
+const TOPIC_ALIASES = {
+  "Basic Operations": { root: "Basic Operations", extra: ["Addition and subtraction combine quantities and differences.", "Multiplication is repeated grouping; division separates into equal parts.", "Order of operations: parentheses, multiplication/division, addition/subtraction."] },
+  Fractions: { root: "Fractions", extra: ["Proper fractions are less than one; improper fractions are one or greater.", "Mixed numbers combine a whole number and a fraction.", "LCD lets unlike denominators become comparable."] },
+  Decimals: { root: "Decimals", extra: ["Decimals express parts of a whole using place value.", "Tenths, hundredths, and thousandths determine the size of each digit.", "Align decimal points before adding or subtracting."] },
+  Percentages: { root: "Percentages", extra: ["Percent means per hundred.", "Percentage = Part / Whole x 100.", "Increase and decrease items compare the change to the original value."] },
+  "Ratios and Proportions": { root: "Ratios and Proportions", extra: ["A ratio compares quantities.", "A proportion states that two ratios are equal.", "Cross multiplication solves missing proportion values."] },
+  "Profit and Loss": { root: "Profit and Loss", extra: ["Profit equals selling price minus cost.", "Loss equals cost minus selling price.", "Profit or loss rate usually uses cost as the base."] },
+  Discounts: { root: "Discounts", extra: ["Discount equals rate times marked price.", "Sale price equals marked price minus discount.", "Successive discounts are applied one after another."] },
+  "Word Problems": { root: "Word Problems", extra: ["Translate words into equations before solving.", "Distance = rate x time.", "Work problems use fractional work rates."] },
+  "Number Series": { root: "Number Series", extra: ["Number series items test pattern recognition.", "Check differences, ratios, alternating rules, squares, and cubes.", "Do not stop after one term; verify the pattern across the series."] },
+  "Simple Interest": { root: "Simple Interest", extra: ["Simple interest uses I = PRT.", "Rate must be converted to decimal.", "Amount equals principal plus interest."] },
+  Analogy: { root: "Analogy", extra: ["Analogies compare relationships, not just word meanings.", "Common relationships include function, category, part-whole, cause-effect, and degree.", "State the bridge sentence before checking options."] },
+  Logic: { root: "Logic", extra: ["Logic questions test whether a conclusion necessarily follows.", "Use only the stated premises.", "Valid reasoning preserves the structure of the given statements."] },
+  Assumptions: { root: "Assumptions", extra: ["An assumption is an unstated idea needed for an argument to work.", "If removing a statement weakens the argument, it may be an assumption.", "Assumptions connect evidence to conclusion."] },
+  Conclusions: { root: "Conclusions", extra: ["A conclusion must be supported by the statements.", "Strong conclusions do not add facts beyond the premises.", "Quantifiers control what can be concluded."] },
+  "Word Association": { root: "Word Association", extra: ["Word association tests semantic links.", "Look for category, function, location, user, tool, or opposite relationships.", "Do not choose a word merely because it is familiar."] },
+  "Data Interpretation": { root: "Data Interpretation", extra: ["Data interpretation uses tables, charts, and percentages.", "Read labels, units, and totals first.", "Compare values only after confirming the base."] },
+  "Pattern Recognition": { root: "Pattern Recognition", extra: ["Patterns can be numerical, visual, alphabetical, or logical.", "Test simple rules before complex ones.", "Look for alternating sequences and position-based changes."] },
+  "Critical Thinking": { root: "Critical Thinking", extra: ["Critical thinking evaluates evidence, assumptions, and weak reasoning.", "A fallacy is a flaw in reasoning.", "Strong answers stay relevant to the claim."] },
+  "Philippine Constitution": { root: "Philippine Constitution", extra: ["The Constitution is the fundamental law of the Philippines.", "High-yield areas include general principles, Bill of Rights, citizenship, suffrage, and branches of government.", "Government powers are distributed among legislative, executive, and judicial branches."] },
+  "RA 6713": { root: "RA 6713", extra: ["RA 6713 is the Code of Conduct and Ethical Standards for Public Officials and Employees.", "Core norms include commitment to public interest, professionalism, justness, political neutrality, responsiveness, nationalism, democracy, and simple living.", "Public office is a public trust."] },
+  "Human Rights": { root: "Human Rights", extra: ["Human rights protect dignity, equality, and freedom.", "Civil service items often ask how public employees should treat citizens fairly.", "Rights-based service avoids discrimination and respects due process."] },
+  "Environmental Management": { root: "Environmental Management", extra: ["Environmental management balances development, health, and sustainability.", "High-yield concepts include waste segregation, climate change, conservation, pollution control, and ecological responsibility.", "Government programs must consider long-term public welfare."] },
+  "Government Structure": { root: "Government Structure", extra: ["The Philippine government has legislative, executive, and judicial branches.", "Checks and balances prevent abuse of power.", "Local government units deliver many frontline services."] },
+  "Public Service Values": { root: "Public Service Values", extra: ["Public service values guide ethical government work.", "Key values include accountability, transparency, responsiveness, fairness, and integrity.", "Situational items ask what a public employee should do under pressure."] },
+  "Current Events": { root: "Current Events", extra: ["Current events questions test awareness of public issues and government responses.", "Focus on national issues, public health, economy, disaster response, environment, technology, and governance.", "Use verified information and avoid rumor-based conclusions."] }
+};
+
+function reviewContentFor(category, topic) {
+  const direct = TOPIC_REVIEW_CONTENT[topic];
+  if (direct) return direct;
+  const alias = TOPIC_ALIASES[topic];
+  const numerical = NUMERICAL_LESSON_DETAILS[topic];
+  if (numerical) {
+    return {
+      lessons: [`${topic} questions test computation accuracy and speed.`, ...(alias?.extra || [])],
+      definitions: alias?.extra || [`${topic} is a core numerical reasoning topic.`],
+      concepts: [numerical.formulas.join(" "), numerical.mental, numerical.shortcut],
+      rules: numerical.formulas,
+      examples: [numerical.example],
+      worked: [`Worked solution: ${numerical.example}`],
+      tips: [numerical.shortcut, numerical.mental],
+      mistakes: ["Using the wrong base value.", "Skipping unit conversion.", "Rounding too early before the final answer."],
+      patterns: [`Direct ${topic} computation.`, `${topic} word problem translation.`, `Missing-value ${topic} items.`],
+      memory: [numerical.drill]
+    };
+  }
+  if (alias) {
+    return {
+      lessons: [`${topic} is a high-yield Civil Service topic.`, ...(alias.extra || [])],
+      definitions: alias.extra || [`Key terms and principles under ${topic}.`],
+      concepts: alias.extra || [`Recognize the tested relationship in ${topic}.`],
+      rules: [`Use the specific rule or principle tested by ${topic}.`, "Match the answer to the facts stated in the item."],
+      examples: [`A ${topic} item may ask for the principle that best applies to a public-service scenario.`],
+      worked: [`Worked approach: identify the ${topic} principle, eliminate unrelated options, then choose the answer supported by the facts.`],
+      tips: [`For ${topic}, name the exact relationship or principle before reading choices.`],
+      mistakes: ["Using outside assumptions.", "Choosing a related but unsupported option.", "Ignoring qualifiers such as all, some, only, or except."],
+      patterns: [`Definition of ${topic}.`, `Scenario application of ${topic}.`, `Best conclusion or best action under ${topic}.`],
+      memory: [`Topic cue: ${topic} asks for exact rule application, not memorized letter patterns.`]
+    };
+  }
+  return TOPIC_REVIEW_CONTENT.Vocabulary;
+}
+
 const DIFFICULTIES = ["Easy", "Medium", "Hard"];
 const rankLevels = [
   { name: "Beginner", threshold: 0 },
@@ -1762,6 +1925,7 @@ export default function App() {
     const hasSelection = category !== "All Categories" || subCategory !== "All Topics";
     const topicSelected = !!selectedCategory && subCategory !== "All Topics";
     const lesson = topicSelected ? selectedLesson : null;
+    const topicReview = topicSelected ? reviewContentFor(category, subCategory) : null;
     const disabledClass = "cursor-not-allowed border border-white/10 bg-white/5 text-white/35";
     const primaryClass = "bg-white text-slate-950 hover:scale-[1.02]";
     const run = (nextMode) => {
@@ -1780,8 +1944,8 @@ export default function App() {
       {hasSelection && !topicSelected && selectedCategory && <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-4">
         {selectedCategory.subs.map((topic) => <button key={topic} onClick={() => { setSubCategory(topic); setLearningTab("Learn"); }} className="rounded-2xl bg-slate-900/45 p-4 text-left transition hover:bg-white/10"><b>{topic}</b><p className="mt-2 text-xs text-white/45">{allQuestions.filter((q) => q.category === selectedCategory.name && q.subCategory === topic).length} questions available</p></button>)}
       </div>}
-      {topicSelected && lesson && learningTab === "Learn" && <div className="grid gap-4 lg:grid-cols-2">
-        {[["Lessons", [lesson.introduction, lesson.explanation]], ["Notes", [lesson.notes, lesson.memoryAid]], ["Review Materials", lesson.examples], ["Exam Strategies", lesson.techniques], ["Tips and Tricks", lesson.tips], ["Topic Guides", lesson.stepGuide], ["Memory Techniques", [lesson.memoryAid, "Use short recall checks after each set of items."]], ["Common Exam Patterns", ["Frequently tested concepts appear as direct rule checks, scenario judgment, and elimination items.", "Common traps include absolute wording, wrong operation, and familiar but unsupported choices."]], ["Practice Examples", lesson.examples], ["Most Missed Questions", stats.subStats.find((s) => s.name === subCategory)?.wrong ? [`You have missed ${stats.subStats.find((s) => s.name === subCategory)?.wrong} item(s) in this topic. Use Wrong Drill until corrected.`] : ["Most missed items appear after you answer this topic."]]].map(([title, rows]) => <div key={title} className="rounded-2xl bg-slate-900/45 p-4"><h4 className="font-black">{title}</h4>{rows.map((row) => <p key={row} className="mt-2 text-sm leading-7 text-white/65">{row}</p>)}</div>)}
+      {topicSelected && lesson && topicReview && learningTab === "Learn" && <div className="grid gap-4 lg:grid-cols-2">
+        {[["Actual Lesson Content", topicReview.lessons], ["Topic Definitions", topicReview.definitions], ["Core Concepts", topicReview.concepts], ["Rules / Formulas", topicReview.rules], ["Examples", topicReview.examples], ["Worked Solutions", topicReview.worked], ["Topic-Specific Tips", topicReview.tips], ["Common Mistakes", topicReview.mistakes], ["Exam Patterns", topicReview.patterns], ["Memory Aids", topicReview.memory], ["Most Missed Questions", stats.subStats.find((s) => s.name === subCategory)?.wrong ? [`You have missed ${stats.subStats.find((s) => s.name === subCategory)?.wrong} item(s) in this topic. Use Wrong Drill until corrected.`] : [`No missed ${subCategory} questions recorded yet.`]]].map(([title, rows]) => <div key={title} className="rounded-2xl bg-slate-900/45 p-4"><h4 className="font-black">{title}</h4>{rows.map((row) => <p key={row} className="mt-2 text-sm leading-7 text-white/65">{row}</p>)}</div>)}
       </div>}
       {hasSelection && learningTab === "Test" && <div className="space-y-5">
         <div className="grid gap-3 sm:grid-cols-2">
