@@ -1681,6 +1681,7 @@ function parserDebugReport(rawText) {
     };
   });
   const starts = findReviewerQuestionStarts(cleaned);
+  const blockAudit = auditReviewerQuestionBlocks(cleaned, starts);
   const blocks = starts.slice(0, 5).map((start, index) => {
     const blockStart = start.index || 0;
     const blockEnd = starts[index + 1]?.index ?? cleaned.length;
@@ -1693,6 +1694,9 @@ function parserDebugReport(rawText) {
     questionMatches,
     choiceMatches,
     candidateMatches,
+    blockAudit: blockAudit.slice(0, 20),
+    acceptedBlocks: blockAudit.filter((row) => row.accepted).slice(0, 10),
+    rejectedBlocks: blockAudit.filter((row) => !row.accepted).slice(0, 10),
     cleanedBlocks: blocks,
     strictQuestionStarts: starts.slice(0, 5).map((match) => ({ token: match[1], index: match.index || 0 })),
     failurePoint: starts.length
@@ -1723,6 +1727,38 @@ function extractChoicesFromBlock(block) {
     index: match.index || 0,
     text: match[2].replace(/\n+/g, " ").replace(/[✓✔*]\s*$/g, "").trim()
   })).filter((choice) => choice.text);
+}
+
+function auditReviewerQuestionBlocks(text, starts) {
+  return starts.map((start, index) => {
+    const blockStart = start.index || 0;
+    const blockEnd = starts[index + 1]?.index ?? text.length;
+    const block = text.slice(blockStart, blockEnd).trim();
+    const choiceRows = extractChoicesFromBlock(block);
+    const firstChoiceAt = choiceRows[0]?.index ?? -1;
+    const stem = firstChoiceAt >= 0
+      ? block.slice(0, firstChoiceAt).replace(/^\s*(?:Q\s*)?\d{1,3}\s*(?:\.\s*\)|\)|\.)\s*/, "").trim()
+      : block.replace(/^\s*(?:Q\s*)?\d{1,3}\s*(?:\.\s*\)|\)|\.)\s*/, "").trim();
+    let reason = "Accepted";
+    if (!block.length) reason = "Rejected: empty question block";
+    else if (block.length < 10) reason = "Rejected: invalid block length";
+    else if (!stem) reason = "Rejected: empty question text";
+    else if (stem.length < 12) reason = "Rejected: question text is too short";
+    else if (!choiceRows.length) reason = "Rejected: no choices found";
+    else if (choiceRows.length < 2) reason = "Rejected: less than 2 choices";
+    return {
+      questionNumber: questionNumberFromToken(start[1]),
+      startPosition: blockStart,
+      nextQuestionPosition: blockEnd,
+      extractedBlockLength: block.length,
+      choiceCountFound: choiceRows.length,
+      accepted: reason === "Accepted",
+      reason,
+      questionText: stem.slice(0, 260),
+      choices: choiceRows.slice(0, 4).map((choice) => `${choice.letter}. ${choice.text.slice(0, 140)}`),
+      blockSample: block.slice(0, 700)
+    };
+  });
 }
 
 function extractActualReviewerQuestionsV2(text, importItem) {
@@ -3174,6 +3210,11 @@ export default function App() {
                       <div><b>First 5 answer-choice matches</b><pre className="mt-1 max-h-60 overflow-auto whitespace-pre-wrap rounded-lg bg-slate-950/70 p-2">{JSON.stringify(debug.choiceMatches || [], null, 2)}</pre></div>
                     </div>
                     <div><b>Strict candidate checks</b><pre className="mt-1 max-h-60 overflow-auto whitespace-pre-wrap rounded-lg bg-slate-950/70 p-2">{JSON.stringify(debug.candidateMatches || [], null, 2)}</pre></div>
+                    <div><b>Question block builder audit - first 20 starts</b><pre className="mt-1 max-h-72 overflow-auto whitespace-pre-wrap rounded-lg bg-slate-950/70 p-2">{JSON.stringify(debug.blockAudit || [], null, 2)}</pre></div>
+                    <div className="grid gap-3 lg:grid-cols-2">
+                      <div><b>First 10 accepted blocks</b><pre className="mt-1 max-h-72 overflow-auto whitespace-pre-wrap rounded-lg bg-emerald-950/40 p-2">{JSON.stringify(debug.acceptedBlocks || [], null, 2)}</pre></div>
+                      <div><b>First 10 rejected blocks</b><pre className="mt-1 max-h-72 overflow-auto whitespace-pre-wrap rounded-lg bg-red-950/35 p-2">{JSON.stringify(debug.rejectedBlocks || [], null, 2)}</pre></div>
+                    </div>
                     <div><b>First 5 cleaned text blocks after preprocessing</b><pre className="mt-1 max-h-72 overflow-auto whitespace-pre-wrap rounded-lg bg-slate-950/70 p-2">{(debug.cleanedBlocks || []).join("\n\n--- BLOCK ---\n\n") || "No blocks accepted by strict question-start detection."}</pre></div>
                   </div>
                 </details>
