@@ -2551,11 +2551,42 @@ export default function App() {
     return { text: "", method: "Unsupported file type", pagesRead: null, error: `${ext.toUpperCase()} import is not supported.` };
   }
 
+  async function expandReviewerUpload(file) {
+    const ext = file.name.split(".").pop().toLowerCase();
+    if (ext !== "zip") return [file];
+    const JSZip = (await import("jszip")).default;
+    const archive = await JSZip.loadAsync(await file.arrayBuffer());
+    const supported = [];
+    const unsupported = [];
+    for (const entry of Object.values(archive.files)) {
+      if (entry.dir) continue;
+      const entryExt = entry.name.split(".").pop().toLowerCase();
+      if (["pdf", "docx", "txt"].includes(entryExt)) {
+        const blob = await entry.async("blob");
+        supported.push(new File([blob], `${file.name.replace(/\.zip$/i, "")}/${entry.name}`, { type: entryExt === "pdf" ? "application/pdf" : entryExt === "docx" ? "application/vnd.openxmlformats-officedocument.wordprocessingml.document" : "text/plain" }));
+      } else if (["png", "jpg", "jpeg", "webp"].includes(entryExt)) {
+        unsupported.push(entry.name);
+      }
+    }
+    if (!supported.length) {
+      return [new File([`ZIP contained no supported PDF/DOCX/TXT reviewer files. Image files need OCR before import: ${unsupported.slice(0, 12).join(", ")}`], `${file.name} extraction report.txt`, { type: "text/plain" })];
+    }
+    if (unsupported.length) {
+      const report = `Skipped image files from ${file.name}. OCR is not implemented in the browser importer, so these files were not converted into questions:\n\n${unsupported.join("\n")}`;
+      supported.push(new File([report], `${file.name} skipped image OCR report.txt`, { type: "text/plain" }));
+    }
+    return supported;
+  }
+
   async function importReviewers(files) {
     setImportBusy(true);
     try {
       const imported = [];
-      for (const file of Array.from(files)) {
+      const uploadFiles = [];
+      for (const selectedFile of Array.from(files)) {
+        uploadFiles.push(...await expandReviewerUpload(selectedFile));
+      }
+      for (const file of uploadFiles) {
         const extraction = await readReviewerFile(file);
         const text = extraction.text || "";
         const fallbackText = text.trim() || file.name;
@@ -2588,7 +2619,7 @@ export default function App() {
       }
       setProgress((p) => ({ ...p, imports: [...(p.imports || []), ...imported].slice(-30) }));
       const totalDetected = imported.reduce((sum, item) => sum + (item.detectedQuestionCount || 0), 0);
-      setImportMessage(totalDetected ? `${totalDetected} actual reviewer questions detected. Review the raw extracted text before transfer.` : "No actual answer-keyed reviewer questions were detected. Transfer is blocked; no synthetic questions were generated.");
+      setImportMessage(totalDetected ? `${totalDetected} actual reviewer questions detected from ${uploadFiles.length} file(s). Review the raw extracted text before transfer.` : "No actual answer-keyed reviewer questions were detected. Transfer is blocked; no synthetic questions were generated.");
       setScreen("admin");
     } finally {
       setImportBusy(false);
@@ -2971,7 +3002,7 @@ export default function App() {
     if (!isAdmin) return <div className="mx-auto max-w-4xl px-4 py-10"><section className="rounded-[2rem] border border-white/10 bg-white/[.08] p-7 text-center backdrop-blur-xl"><h2 className="text-3xl font-black">Admin Access Required</h2><p className="mt-3 text-white/60">Only accounts with the Admin role can manage users, licenses, sessions, and approvals.</p></section></div>;
     return <div className="mx-auto max-w-7xl px-4 py-8">
       <div className="rounded-[2rem] border border-white/10 bg-white/[.08] p-6 backdrop-blur-xl">
-        <div className="flex flex-wrap items-start justify-between gap-4"><div><p className="text-emerald-200">Reviewer Import System</p><h2 className="text-3xl font-black">Admin Import Module</h2><p className="mt-2 max-w-3xl text-sm text-white/60">Upload PDF, DOCX, or TXT reviewers. The app extracts available text, detects answer-keyed reviewer questions, shows the raw extraction preview, and blocks transfer when no actual questions are found.</p></div><label className="inline-flex min-h-12 cursor-pointer items-center gap-2 rounded-2xl bg-white px-5 font-black text-slate-950"><Upload className="h-4 w-4" />{importBusy ? "Analyzing..." : "Upload Reviewers"}<input type="file" multiple accept=".pdf,.docx,.txt" className="hidden" onChange={(e) => importReviewers(e.target.files)} /></label></div>
+        <div className="flex flex-wrap items-start justify-between gap-4"><div><p className="text-emerald-200">Reviewer Import System</p><h2 className="text-3xl font-black">Admin Import Module</h2><p className="mt-2 max-w-3xl text-sm text-white/60">Upload PDF, DOCX, TXT, or ZIP reviewers. ZIP uploads are unpacked in the browser and only real PDF/DOCX/TXT files inside are parsed; image files are reported as needing OCR.</p></div><label className="inline-flex min-h-12 cursor-pointer items-center gap-2 rounded-2xl bg-white px-5 font-black text-slate-950"><Upload className="h-4 w-4" />{importBusy ? "Analyzing..." : "Upload Reviewers"}<input type="file" multiple accept=".pdf,.docx,.txt,.zip" className="hidden" onChange={(e) => importReviewers(e.target.files)} /></label></div>
         <div className="mt-6 grid gap-3 md:grid-cols-5"><div className="rounded-2xl bg-slate-900/55 p-4"><div className="text-2xl font-black">{baseQuestions.length}</div><div className="text-xs text-white/50">Total Questions</div></div>{bankStats.map((s) => <div key={s.name} className="rounded-2xl bg-slate-900/55 p-4"><div className="text-2xl font-black">{s.count}</div><div className="text-xs text-white/50">{s.name}</div></div>)}</div>
         <div className="mt-3 grid gap-3 md:grid-cols-3">{difficultyStats.map((s) => <div key={s.name} className="rounded-2xl bg-slate-900/40 p-3"><div className="text-xl font-black">{s.count}</div><div className="text-xs text-white/50">{s.name} difficulty</div></div>)}</div>
         <div className="mt-5 rounded-2xl bg-slate-900/45 p-4"><h3 className="mb-3 font-black">Question Counts by Subcategory</h3><div className="grid max-h-72 gap-2 overflow-auto pr-1 sm:grid-cols-2 lg:grid-cols-4">{topicStats.map((s) => <div key={`${s.category}-${s.name}`} className="rounded-xl bg-white/5 p-3"><div className="text-sm font-bold">{s.name}</div><div className="text-xs text-white/45">{s.category}</div><div className="mt-1 text-lg font-black">{s.count}</div></div>)}</div></div>
