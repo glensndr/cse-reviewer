@@ -1645,8 +1645,64 @@ function questionNumberFromToken(token) {
   return match ? Number(match[0]) : null;
 }
 
+const QUESTION_NUMBER_REGEX_TEXT = String.raw`(?:^|\n)\s*((?:Q\s*)?\d{1,3})\s*[\.\)]\s+`;
+const ANSWER_CHOICE_REGEX_TEXT = String.raw`(?:^|\n)\s*([A-Da-d])\s*[\.\)]\s+`;
+const QUESTION_NUMBER_REGEX = /(?:^|\n)\s*((?:Q\s*)?\d{1,3})\s*[\.\)]\s+/gi;
+const ANSWER_CHOICE_REGEX = /(?:^|\n)\s*([A-Da-d])\s*[\.\)]\s+/gi;
+
+function previewAround(text, index, length = 180) {
+  const start = Math.max(0, index - 45);
+  return text.slice(start, index + length).replace(/\n/g, "\\n");
+}
+
+function firstRegexMatches(text, regex, count = 5) {
+  return [...text.matchAll(regex)].slice(0, count).map((match) => ({
+    match: match[0].replace(/\n/g, "\\n"),
+    token: match[1] || "",
+    index: match.index || 0,
+    preview: previewAround(text, match.index || 0)
+  }));
+}
+
+function parserDebugReport(rawText) {
+  const cleaned = normalizeReviewerText(rawText || "");
+  const questionMatches = firstRegexMatches(cleaned, QUESTION_NUMBER_REGEX);
+  const choiceMatches = firstRegexMatches(cleaned, ANSWER_CHOICE_REGEX);
+  const candidateMatches = [...cleaned.matchAll(QUESTION_NUMBER_REGEX)].slice(0, 5).map((match) => {
+    const tail = cleaned.slice((match.index || 0) + match[0].length, (match.index || 0) + match[0].length + 260);
+    return {
+      token: match[1],
+      index: match.index || 0,
+      hasChoiceA: /(?:^|\n)\s*a\s*[\.\)]\s+/i.test(tail),
+      hasChoiceB: /(?:^|\n)\s*b\s*[\.\)]\s+/i.test(tail),
+      tail: tail.replace(/\n/g, "\\n")
+    };
+  });
+  const starts = findReviewerQuestionStarts(cleaned);
+  const blocks = starts.slice(0, 5).map((start, index) => {
+    const blockStart = start.index || 0;
+    const blockEnd = starts[index + 1]?.index ?? cleaned.length;
+    return cleaned.slice(blockStart, blockEnd).trim().slice(0, 700);
+  });
+  return {
+    regex: { questionNumbers: QUESTION_NUMBER_REGEX_TEXT, answerChoices: ANSWER_CHOICE_REGEX_TEXT },
+    rawSample: (rawText || "").slice(0, 2500),
+    cleanedSample: cleaned.slice(0, 2500),
+    questionMatches,
+    choiceMatches,
+    candidateMatches,
+    cleanedBlocks: blocks,
+    strictQuestionStarts: starts.slice(0, 5).map((match) => ({ token: match[1], index: match.index || 0 })),
+    failurePoint: starts.length
+      ? "Question starts were found. If parsed count is still 0, inspect the cleaned blocks and choice extraction."
+      : questionMatches.length
+        ? "Question-number regex matched, but strict question-start filtering rejected them because nearby A/B choices were not detected after preprocessing."
+        : "Question-number regex found no matches in cleaned text. The extracted PDF text likely has spacing or glyphs that still need normalization."
+  };
+}
+
 function findReviewerQuestionStarts(text) {
-  const matches = [...text.matchAll(/(?:^|\n)\s*((?:Q\s*)?\d{1,3})\s*[\.\)]\s+/gi)];
+  const matches = [...text.matchAll(QUESTION_NUMBER_REGEX)];
   const candidates = matches.filter((match) => {
     const number = questionNumberFromToken(match[1]);
     if (!number) return false;
@@ -1725,6 +1781,8 @@ function extractActualReviewerQuestionsV2(text, importItem) {
   unique.parseStats = {
     extractedTextLength: normalized.length,
     questionsDetected: starts.length,
+    regexQuestionMatches: firstRegexMatches(normalized, QUESTION_NUMBER_REGEX).length,
+    regexChoiceMatches: firstRegexMatches(normalized, ANSWER_CHOICE_REGEX).length,
     questionsWithChoices: unique.length,
     questionsWithAnswerKeys: unique.filter((q) => q.answer).length,
     questionsWithoutAnswerKeys: unique.filter((q) => !q.answer).length,
@@ -2628,11 +2686,13 @@ export default function App() {
         };
         const extractedQuestions = extractActualReviewerQuestionsV2(text, draftItem);
         const parseStats = extractedQuestions.parseStats || {};
+        const parserDebug = parserDebugReport(text);
         imported.push({
           ...draftItem,
           extractedQuestions,
           detectedQuestionCount: extractedQuestions.length,
           parseStats,
+          parserDebug,
           importStatus: extraction.error ? "Extraction Error" : extractedQuestions.length ? "Questions Detected" : "No Questions Detected"
         });
       }
@@ -3058,6 +3118,7 @@ export default function App() {
             {(progress.imports || []).map((item) => {
               const detectedCount = item.detectedQuestionCount || item.extractedQuestions?.length || 0;
               const stats = item.parseStats || {};
+              const debug = item.parserDebug || {};
               const sectionCounts = (item.extractedQuestions || []).reduce((acc, q) => {
                 const key = q.subCategory || "Unclassified";
                 acc[key] = (acc[key] || 0) + 1;
@@ -3071,6 +3132,8 @@ export default function App() {
                 <div className="mt-3 grid gap-2 text-xs text-white/60 sm:grid-cols-3">
                   <span className="rounded-xl bg-white/5 p-2">Text length: {stats.extractedTextLength || item.rawTextPreview?.length || 0}</span>
                   <span className="rounded-xl bg-white/5 p-2">Numbered items: {stats.questionsDetected || 0}</span>
+                  <span className="rounded-xl bg-white/5 p-2">Regex question hits: {stats.regexQuestionMatches ?? debug.questionMatches?.length ?? 0}</span>
+                  <span className="rounded-xl bg-white/5 p-2">Regex choice hits: {stats.regexChoiceMatches ?? debug.choiceMatches?.length ?? 0}</span>
                   <span className="rounded-xl bg-white/5 p-2">With choices: {stats.questionsWithChoices || detectedCount}</span>
                   <span className="rounded-xl bg-white/5 p-2">With answers: {stats.questionsWithAnswerKeys || 0}</span>
                   <span className="rounded-xl bg-white/5 p-2">Missing answers: {stats.questionsWithoutAnswerKeys || 0}</span>
@@ -3091,6 +3154,21 @@ export default function App() {
                 <details className="mt-3 rounded-xl bg-slate-950/55 p-3 text-xs text-white/60">
                   <summary className="cursor-pointer font-bold text-white/80">Show raw extracted text</summary>
                   <pre className="mt-3 max-h-64 overflow-auto whitespace-pre-wrap leading-5">{item.rawTextPreview || "Raw extracted text was not saved for this legacy import. Re-upload the file to inspect extraction output."}</pre>
+                </details>
+                <details className="mt-3 rounded-xl border border-amber-200/15 bg-amber-300/10 p-3 text-xs text-white/70">
+                  <summary className="cursor-pointer font-bold text-amber-100">Parser Debug: Raw to Cleaned to Matches</summary>
+                  <div className="mt-3 space-y-3">
+                    <div><b>Regex used</b><pre className="mt-1 overflow-auto whitespace-pre-wrap rounded-lg bg-slate-950/70 p-2">Question: {debug.regex?.questionNumbers || QUESTION_NUMBER_REGEX_TEXT}{"\n"}Choice: {debug.regex?.answerChoices || ANSWER_CHOICE_REGEX_TEXT}</pre></div>
+                    <div><b>Failure point</b><p className="mt-1 rounded-lg bg-slate-950/70 p-2">{debug.failurePoint || "Re-upload this file to generate parser diagnostics."}</p></div>
+                    <div><b>RAW TEXT sample</b><pre className="mt-1 max-h-52 overflow-auto whitespace-pre-wrap rounded-lg bg-slate-950/70 p-2">{debug.rawSample || item.rawTextPreview || "No raw sample available."}</pre></div>
+                    <div><b>CLEANED TEXT sample</b><pre className="mt-1 max-h-52 overflow-auto whitespace-pre-wrap rounded-lg bg-slate-950/70 p-2">{debug.cleanedSample || "No cleaned sample available. Re-upload the file."}</pre></div>
+                    <div className="grid gap-3 lg:grid-cols-2">
+                      <div><b>First 5 question-number matches</b><pre className="mt-1 max-h-60 overflow-auto whitespace-pre-wrap rounded-lg bg-slate-950/70 p-2">{JSON.stringify(debug.questionMatches || [], null, 2)}</pre></div>
+                      <div><b>First 5 answer-choice matches</b><pre className="mt-1 max-h-60 overflow-auto whitespace-pre-wrap rounded-lg bg-slate-950/70 p-2">{JSON.stringify(debug.choiceMatches || [], null, 2)}</pre></div>
+                    </div>
+                    <div><b>Strict candidate checks</b><pre className="mt-1 max-h-60 overflow-auto whitespace-pre-wrap rounded-lg bg-slate-950/70 p-2">{JSON.stringify(debug.candidateMatches || [], null, 2)}</pre></div>
+                    <div><b>First 5 cleaned text blocks after preprocessing</b><pre className="mt-1 max-h-72 overflow-auto whitespace-pre-wrap rounded-lg bg-slate-950/70 p-2">{(debug.cleanedBlocks || []).join("\n\n--- BLOCK ---\n\n") || "No blocks accepted by strict question-start detection."}</pre></div>
+                  </div>
                 </details>
                 <div className="mt-4 flex flex-wrap items-center gap-2">
                   <button onClick={() => publishImportedReviewer(item)} disabled={importBusy || item.publishedAt || !detectedCount} className="rounded-xl bg-emerald-400/20 px-3 py-2 text-xs font-bold text-emerald-100 disabled:opacity-40">{item.publishedAt ? "Transferred to Bank" : "Approve & Transfer Exact Questions"}</button>
