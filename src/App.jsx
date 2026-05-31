@@ -2042,6 +2042,14 @@ function detectReviewerConcept(text, category, topic) {
 
 function arithmeticFromConcept(text) {
   const normalized = String(text || "").replace(/[−–—]/g, "-").replace(/[×x]/gi, "*").replace(/[÷]/g, "/");
+  const fractionMatch = normalized.match(/(\d+)\s*\/\s*(\d+)\s*([+\-])\s*(\d+)\s*\/\s*(\d+)/);
+  if (fractionMatch) {
+    const leftFraction = Number(fractionMatch[1]) / Number(fractionMatch[2]);
+    const rightFraction = Number(fractionMatch[4]) / Number(fractionMatch[5]);
+    const fractionOp = fractionMatch[3];
+    const fractionValue = fractionOp === "+" ? leftFraction + rightFraction : leftFraction - rightFraction;
+    if (Number.isFinite(fractionValue)) return { left: leftFraction, right: rightFraction, op: fractionOp, value: Number.isInteger(fractionValue) ? String(fractionValue) : String(Number(fractionValue.toFixed(2))), expression: `${fractionMatch[1]}/${fractionMatch[2]} ${fractionOp} ${fractionMatch[4]}/${fractionMatch[5]}` };
+  }
   let match = normalized.match(/(-?\d+(?:\.\d+)?)\s*([+\-*/])\s*(-?\d+(?:\.\d+)?)(?:\s*[=?])?/);
   let left = match ? Number(match[1]) : null;
   let right = match ? Number(match[3]) : null;
@@ -2065,6 +2073,23 @@ function arithmeticFromConcept(text) {
 function isInvalidReviewerAssistedDraftQuestion(question) {
   const text = String(question || "").trim().toLowerCase();
   return !text || text.startsWith("based on the reviewer") || text.includes("reviewer item");
+}
+
+const NUMERICAL_BANNED_CHOICE_WORDS = /\b(scope|statement|argument|assumption|conclusion|reasoning|reader|passage|topic|concept)\b/i;
+
+function isNumericChoiceText(choice) {
+  const text = String(choice || "").trim();
+  return /^[-+]?(?:PHP\s*)?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?\s*(?:%|m|km|kg|hrs?|hours?|days?|pesos?)?$/i.test(text)
+    || /^[-+]?\d+\s*\/\s*\d+$/.test(text);
+}
+
+function isInvalidReviewerAssistedDraft(draft) {
+  if (!draft || isInvalidReviewerAssistedDraftQuestion(draft.question)) return true;
+  if (draft.category !== "Numerical Ability") return false;
+  return !draft.answer
+    || !isNumericChoiceText(draft.answer)
+    || (draft.choices || []).length < 4
+    || (draft.choices || []).some((choice) => NUMERICAL_BANNED_CHOICE_WORDS.test(String(choice)) || !isNumericChoiceText(choice));
 }
 
 function numericDistractors(answerValue, seedText) {
@@ -2095,12 +2120,8 @@ function createReviewerAssistedQuestionDrafts({ importItem, existingQuestions, a
       answer = arithmetic.value;
       rawChoices = [answer, ...numericDistractors(answer, id)];
       explanation = `The original reviewer question asks the learner to compute ${arithmetic.expression}. The correct answer is ${answer}. The other options reflect common computation or place-value errors and should be eliminated by recomputing carefully.`;
-    } else if (/divisibility by 8/i.test(source.concept)) {
-      category = "Numerical Ability";
-      topic = "Number Series";
-      answer = "Check whether the last three digits form a number divisible by 8.";
-      rawChoices = [answer, "Check only whether the last digit is even.", "Add all digits and divide the sum by 8.", "Check whether the first three digits are divisible by 8."];
-      explanation = "A number is divisible by 8 when its last three digits form a number divisible by 8. The other choices confuse divisibility by 2, digit-sum tests, or the wrong part of the number.";
+    } else if (category === "Numerical Ability") {
+      return null;
     } else {
       answer = aiCorrectAnswer(category, topic, index);
       rawChoices = [answer, ...plausibleDistractors(category, topic, answer, id)];
@@ -2140,7 +2161,7 @@ function createReviewerAssistedQuestionDrafts({ importItem, existingQuestions, a
         notes: duplicates.length ? "Potential duplicate question wording detected." : "Reviewer concept converted to draft; admin approval required before publishing."
       }
     };
-  }).filter((draft) => !isInvalidReviewerAssistedDraftQuestion(draft.question));
+  }).filter((draft) => draft && !isInvalidReviewerAssistedDraft(draft));
 }
 
 function createAiLessonDraft({ category, topic, adminEmail }) {
@@ -2668,7 +2689,7 @@ export default function App() {
   }
 
   async function persistReviewerAiDrafts(drafts) {
-    const validDrafts = drafts.filter((draft) => !isInvalidReviewerAssistedDraftQuestion(draft.question));
+    const validDrafts = drafts.filter((draft) => !isInvalidReviewerAssistedDraft(draft));
     if (!supabase || !isAdmin || !validDrafts.length) return false;
     const rows = validDrafts.map((draft) => draftToReviewerAiRow(draft, "Draft", profile?.gmail_address));
     const result = await supabase.from("reviewer_ai_drafts").upsert(rows, { onConflict: "id" }).select(REVIEWER_AI_DRAFT_SELECT);
@@ -3443,7 +3464,7 @@ export default function App() {
         </div>
         <div className="mt-4 flex flex-wrap gap-3"><button onClick={generateAiStudioDrafts} className="rounded-2xl bg-white px-5 py-3 font-black text-slate-950">Generate Draft Content</button><button onClick={() => setAiStudioModule("AI Content Audit")} className="rounded-2xl border border-white/10 bg-white/10 px-5 py-3 font-bold">Open Content Audit</button></div>
         <div className="mt-5 grid gap-4 lg:grid-cols-[1.2fr_.8fr]">
-          <div className="rounded-2xl bg-slate-950/45 p-4"><h3 className="mb-3 font-black">Draft Question Review Queue</h3><div className="max-h-[520px] space-y-3 overflow-auto pr-1">{!aiDrafts.length && <p className="text-sm text-white/55">No AI question drafts yet.</p>}{aiDrafts.map((draft) => <div key={draft.draftId} className="rounded-2xl border border-white/10 bg-white/5 p-4"><div className="mb-2 flex flex-wrap gap-2"><Pill>{draft.status}</Pill><Pill>{draft.source || "AI"}</Pill><Pill>{draft.category}</Pill><Pill>{draft.subCategory}</Pill><Pill>{draft.difficulty}</Pill></div>{draft.sourceReviewerText && <div className="mb-3 rounded-xl border border-cyan-200/15 bg-cyan-300/10 p-3 text-xs text-cyan-50"><b>Original Reviewer Question</b><p className="mt-1 text-white/70">{draft.sourceReviewerText}</p><p className="mt-2 text-white/55">Reviewer: {draft.sourceReviewer} - Concept: {draft.sourceConcept} - Origin: {draft.sourceOrigin}</p></div>}<h4 className="font-black">{draft.question}</h4><p className="mt-3 text-xs font-black uppercase tracking-wide text-cyan-100">Generated Choices</p><div className="mt-2 grid gap-2 sm:grid-cols-2">{draft.choices.map((choice, idx) => <p key={`${draft.draftId}-${choice}`} className={`rounded-xl p-3 text-xs ${choice === draft.answer ? "bg-emerald-300/15 text-emerald-100" : "bg-slate-900/70 text-white/65"}`}>{choiceLetters[idx]}. {choice}</p>)}</div><p className="mt-3 text-xs font-black text-emerald-100">Generated Answer: {draft.answer}</p><p className="mt-3 text-xs font-black uppercase tracking-wide text-cyan-100">Generated Explanation</p><p className="mt-1 text-sm leading-6 text-white/65">{draft.explanation}</p><p className="mt-2 text-xs text-amber-100">Audit: {draft.audit?.notes} {draft.audit?.duplicateQuestions?.length ? `Matches: ${draft.audit.duplicateQuestions.join(", ")}` : ""}</p><div className="mt-3 flex flex-wrap gap-2"><button onClick={() => approveAiQuestion(draft)} disabled={draft.status === "Approved"} className="rounded-xl bg-emerald-400/20 px-3 py-2 text-xs font-bold text-emerald-100 disabled:opacity-40">Approve & Publish</button><button onClick={() => editAiDraft(draft.draftId)} className="rounded-xl bg-cyan-400/20 px-3 py-2 text-xs font-bold text-cyan-100">Edit</button><button onClick={() => updateAiDraftStatus(draft.draftId, "Rejected")} className="rounded-xl bg-red-400/20 px-3 py-2 text-xs font-bold text-red-100">Reject</button><button onClick={() => updateAiDraftStatus(draft.draftId, "Archived")} className="rounded-xl bg-white/10 px-3 py-2 text-xs font-bold">Archive</button></div></div>)}</div></div>
+          <div className="rounded-2xl bg-slate-950/45 p-4"><h3 className="mb-3 font-black">Draft Question Review Queue</h3><div className="max-h-[520px] space-y-3 overflow-auto pr-1">{!aiDrafts.length && <p className="text-sm text-white/55">No AI question drafts yet.</p>}{aiDrafts.map((draft) => <div key={draft.draftId} className="rounded-2xl border border-white/10 bg-white/5 p-4"><div className="mb-2 flex flex-wrap gap-2"><Pill>{draft.status}</Pill><Pill>{draft.source || "AI"}</Pill><Pill>{draft.category}</Pill><Pill>{draft.subCategory}</Pill><Pill>{draft.difficulty}</Pill></div>{draft.sourceReviewerText && <div className="mb-3 rounded-xl border border-cyan-200/15 bg-cyan-300/10 p-3 text-xs text-cyan-50"><b>Original Reviewer Question</b><p className="mt-1 text-white/70">{draft.sourceReviewerText}</p><p className="mt-2 text-white/55">Reviewer: {draft.sourceReviewer} - Concept: {draft.sourceConcept} - Origin: {draft.sourceOrigin}</p></div>}<h4 className="font-black">{draft.question}</h4><p className="mt-3 text-xs font-black uppercase tracking-wide text-cyan-100">Generated Choices</p><div className="mt-2 grid gap-2 sm:grid-cols-2">{draft.choices.map((choice, idx) => <p key={`${draft.draftId}-${choice}`} className={`rounded-xl p-3 text-xs ${choice === draft.answer ? "bg-emerald-300/15 text-emerald-100" : "bg-slate-900/70 text-white/65"}`}>{choiceLetters[idx]}. {choice}</p>)}</div><p className="mt-3 text-xs font-black text-emerald-100">Computed Answer: {draft.answer}</p>{draft.category === "Numerical Ability" && <p className="mt-2 text-xs text-cyan-100">Generated Distractors: {draft.choices.filter((choice) => choice !== draft.answer).join(", ")}</p>}<p className="mt-3 text-xs font-black uppercase tracking-wide text-cyan-100">Generated Explanation</p><p className="mt-1 text-sm leading-6 text-white/65">{draft.explanation}</p><p className="mt-2 text-xs text-amber-100">Audit: {draft.audit?.notes} {draft.audit?.duplicateQuestions?.length ? `Matches: ${draft.audit.duplicateQuestions.join(", ")}` : ""}</p><div className="mt-3 flex flex-wrap gap-2"><button onClick={() => approveAiQuestion(draft)} disabled={draft.status === "Approved"} className="rounded-xl bg-emerald-400/20 px-3 py-2 text-xs font-bold text-emerald-100 disabled:opacity-40">Approve & Publish</button><button onClick={() => editAiDraft(draft.draftId)} className="rounded-xl bg-cyan-400/20 px-3 py-2 text-xs font-bold text-cyan-100">Edit</button><button onClick={() => updateAiDraftStatus(draft.draftId, "Rejected")} className="rounded-xl bg-red-400/20 px-3 py-2 text-xs font-bold text-red-100">Reject</button><button onClick={() => updateAiDraftStatus(draft.draftId, "Archived")} className="rounded-xl bg-white/10 px-3 py-2 text-xs font-bold">Archive</button></div></div>)}</div></div>
           <div className="space-y-4"><div className="rounded-2xl bg-slate-950/45 p-4"><h3 className="mb-3 font-black">Lesson / Notes Drafts</h3><div className="max-h-64 space-y-3 overflow-auto pr-1">{!aiLessons.length && <p className="text-sm text-white/55">No AI lesson drafts yet.</p>}{aiLessons.map((draft) => <div key={draft.id} className="rounded-2xl bg-white/5 p-4"><div className="flex flex-wrap gap-2"><Pill>{draft.status}</Pill><Pill>{draft.topic}</Pill></div><p className="mt-2 text-sm text-white/65">{draft.content.lessonContent?.[0]}</p><div className="mt-3 flex flex-wrap gap-2"><button onClick={() => approveAiLesson(draft)} disabled={draft.status === "Approved"} className="rounded-xl bg-emerald-400/20 px-3 py-2 text-xs font-bold text-emerald-100 disabled:opacity-40">Approve Lesson</button><button onClick={() => updateAiDraftStatus(draft.id, "Archived")} className="rounded-xl bg-white/10 px-3 py-2 text-xs font-bold">Archive</button></div></div>)}</div></div><div className="rounded-2xl bg-slate-950/45 p-4"><h3 className="mb-3 font-black">Content Audit</h3><div className="max-h-72 space-y-2 overflow-auto pr-1">{aiAuditRows.slice().sort((a, b) => a.questions - b.questions).slice(0, 12).map((row) => <div key={`${row.category}-${row.topic}`} className="rounded-xl bg-white/5 p-3 text-sm"><b>{row.topic}</b><p className="text-xs text-white/50">{row.category} - {row.questions} questions - supports about {row.mockCapacity} full topic mock sets</p>{row.repeated.length > 0 && <p className="mt-1 text-xs text-amber-100">Repeated distractor watch: {row.repeated.map(([text, count]) => `${text} (${count})`).join("; ")}</p>}</div>)}</div></div><div className="rounded-2xl border border-amber-200/20 bg-amber-300/10 p-4"><h3 className="font-black">Future Automation Plan</h3><p className="mt-2 text-sm leading-6 text-white/70">Suggested scheduled job: every Sunday, generate 20 Current Events, 20 Government, 20 Constitution, and 20 Logic drafts. Keep them in Draft status until Admin approval.</p></div></div>
         </div>
       </section>
