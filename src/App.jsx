@@ -1618,7 +1618,9 @@ function normalizeReviewerText(text) {
     .replace(/\r/g, "\n")
     .replace(/P\s*a\s*g\s*e\s*\|\s*\d+/gi, "\n")
     .replace(/[^\S\n]+/g, " ")
-    .replace(/([^\n])\s+((?:Q\s*)?\d{1,3})\s*[\.\)]\s+(?=[A-Z0-9(])/gi, "$1\n$2. ")
+    .replace(/\b(\d)\s+(\d)(\s*[\.\)]\s*\)?)/g, "$1$2$3")
+    .replace(/\b(\d)\s+(\d)\s+(\d)(\s*[\.\)]\s*\)?)/g, "$1$2$3$4")
+    .replace(/([^\n])\s+((?:Q\s*)?\d{1,3})\s*(?:\.\s*\)|\)\s*|\.|\))\s+(?=[A-Z0-9(])/gi, "$1\n$2. ")
     .replace(/([^\n])\s+([A-Da-d])\s*[\.\)]\s+(?=\S)/g, "$1\n$2. ")
     .replace(/[ \t]+/g, " ")
     .replace(/\n{3,}/g, "\n\n")
@@ -1645,9 +1647,9 @@ function questionNumberFromToken(token) {
   return match ? Number(match[0]) : null;
 }
 
-const QUESTION_NUMBER_REGEX_TEXT = String.raw`(?:^|\n)\s*((?:Q\s*)?\d{1,3})\s*[\.\)]\s+`;
+const QUESTION_NUMBER_REGEX_TEXT = String.raw`(?:^|\n)\s*((?:Q\s*)?\d{1,3})\s*(?:\.\s*\)|\)|\.)\s+`;
 const ANSWER_CHOICE_REGEX_TEXT = String.raw`(?:^|\n)\s*([A-Da-d])\s*[\.\)]\s+`;
-const QUESTION_NUMBER_REGEX = /(?:^|\n)\s*((?:Q\s*)?\d{1,3})\s*[\.\)]\s+/gi;
+const QUESTION_NUMBER_REGEX = /(?:^|\n)\s*((?:Q\s*)?\d{1,3})\s*(?:\.\s*\)|\)|\.)\s+/gi;
 const ANSWER_CHOICE_REGEX = /(?:^|\n)\s*([A-Da-d])\s*[\.\)]\s+/gi;
 
 function previewAround(text, index, length = 180) {
@@ -1754,7 +1756,7 @@ function extractActualReviewerQuestionsV2(text, importItem) {
     if (choiceRows.length < 2) return;
     const firstChoiceAt = choiceRows[0].index;
     const questionNumber = questionNumberFromToken(start[1]);
-    const stem = block.slice(0, firstChoiceAt).replace(/^\s*(?:Q\s*)?\d{1,3}[\.\)]\s*/, "").trim();
+    const stem = block.slice(0, firstChoiceAt).replace(/^\s*(?:Q\s*)?\d{1,3}\s*(?:\.\s*\)|\)|\.)\s*/, "").trim();
     if (!stem || stem.length < 12) return;
     const choices = choiceRows.slice(0, 4).map((choice) => choice.text);
     const keyLetter = questionNumber ? answerKey[questionNumber] : "";
@@ -3147,11 +3149,11 @@ export default function App() {
                 {!!Object.keys(sectionCounts).length && <div className="mt-3 flex flex-wrap gap-2">{Object.entries(sectionCounts).map(([name, count]) => <Pill key={name}>{name}: {count}</Pill>)}</div>}
                 <div className="mt-3 text-xs text-white/55">{(item.concepts || []).slice(0, 3).map((c) => <p key={c}>- {c}</p>)}</div>
                 {!!(item.extractedQuestions || []).length && <details className="mt-3 rounded-xl bg-slate-950/55 p-3 text-xs text-white/60">
-                  <summary className="cursor-pointer font-bold text-white/80">Preview first 10 parsed questions</summary>
+                  <summary className="cursor-pointer font-bold text-white/80">Preview first 20 parsed questions</summary>
                   <div className="mt-3 max-h-80 space-y-3 overflow-auto">
-                    {(item.extractedQuestions || []).slice(0, 10).map((q) => <div key={q.id} className="rounded-xl bg-white/5 p-3">
+                    {(item.extractedQuestions || []).slice(0, 20).map((q) => <div key={q.id} className="rounded-xl bg-white/5 p-3">
                       <p className="font-bold text-white/80">{q.questionNumber ? `${q.questionNumber}. ` : ""}{q.question}</p>
-                      <p className="mt-1 text-white/45">{q.category} - {q.subCategory} - {q.answer ? "Approved" : "Pending Review"}</p>
+                      <p className="mt-1 text-white/45">Choices: {q.choices.length} - {q.category} - {q.subCategory} - {q.answer ? "Approved" : "Pending Review"}</p>
                       <div className="mt-2 grid gap-1 sm:grid-cols-2">{q.choices.map((choice, idx) => <span key={`${q.id}-${choice}`} className="rounded-lg bg-slate-900/70 p-2">{choiceLetters[idx]}. {choice}</span>)}</div>
                     </div>)}
                   </div>
