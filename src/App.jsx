@@ -1903,6 +1903,7 @@ function draftToReviewerAiRow(draft, status = draft.status || "Draft", adminEmai
 
 function reviewerAiRowToDraft(row) {
   const choices = [row.choice_a, row.choice_b, row.choice_c, row.choice_d].filter(Boolean);
+  const computed = row.category === "Numerical Ability" ? arithmeticFromConcept(row.question) : null;
   const question = makeQuestion({
     id: row.id,
     category: row.category,
@@ -1928,6 +1929,12 @@ function reviewerAiRowToDraft(row) {
     dateGenerated: row.created_at,
     approvedBy: row.approved_by,
     approvedAt: row.approved_at,
+    validation: {
+      computedResult: computed?.value || "",
+      storedCorrectAnswer: row.correct_answer,
+      generatedDistractors: choices.filter((choice) => !sameNumericValue(choice, row.correct_answer)),
+      passed: row.category !== "Numerical Ability" || (!!computed && sameNumericValue(row.correct_answer, computed.value) && choices.every(isNumericChoiceText))
+    },
     tags: [row.category, row.topic, row.difficulty, "reviewer-ai-draft", row.source_concept].filter(Boolean),
     audit: { duplicateQuestions: [], duplicateDistractors: [], notes: "Loaded from persistent reviewer_ai_drafts table." }
   };
@@ -2041,7 +2048,14 @@ function detectReviewerConcept(text, category, topic) {
 }
 
 function arithmeticFromConcept(text) {
-  const normalized = String(text || "").replace(/[−–—]/g, "-").replace(/[×x]/gi, "*").replace(/[÷]/g, "/");
+  const normalized = String(text || "")
+    .replace(/[−–—]/g, "-")
+    .replace(/[×x]/gi, "*")
+    .replace(/[÷]/g, "/")
+    .replace(/^\s*(?:Q\s*)?\d{1,3}\s*(?:\.\s*\)|\)|\.)\s*/i, "")
+    .replace(/\s+[A-Da-d]\s*[\.\)]\s+[\s\S]*$/, " ")
+    .replace(/\?/g, " ")
+    .trim();
   const fractionMatch = normalized.match(/(\d+)\s*\/\s*(\d+)\s*([+\-])\s*(\d+)\s*\/\s*(\d+)/);
   if (fractionMatch) {
     const leftFraction = Number(fractionMatch[1]) / Number(fractionMatch[2]);
@@ -2050,7 +2064,8 @@ function arithmeticFromConcept(text) {
     const fractionValue = fractionOp === "+" ? leftFraction + rightFraction : leftFraction - rightFraction;
     if (Number.isFinite(fractionValue)) return { left: leftFraction, right: rightFraction, op: fractionOp, value: Number.isInteger(fractionValue) ? String(fractionValue) : String(Number(fractionValue.toFixed(2))), expression: `${fractionMatch[1]}/${fractionMatch[2]} ${fractionOp} ${fractionMatch[4]}/${fractionMatch[5]}` };
   }
-  let match = normalized.match(/(-?\d+(?:\.\d+)?)\s*([+\-*/])\s*(-?\d+(?:\.\d+)?)(?:\s*[=?])?/);
+  const expressionMatches = [...normalized.matchAll(/(-?\d+(?:\.\d+)?)\s*([+\-*/])\s*(-?\d+(?:\.\d+)?)(?:\s*[=?])?/g)];
+  let match = expressionMatches[0] || null;
   let left = match ? Number(match[1]) : null;
   let right = match ? Number(match[3]) : null;
   let op = match?.[2];
@@ -2083,23 +2098,47 @@ function isNumericChoiceText(choice) {
     || /^[-+]?\d+\s*\/\s*\d+$/.test(text);
 }
 
+function numericValue(choice) {
+  const clean = String(choice || "").replace(/PHP/gi, "").replace(/,/g, "").replace(/%/g, "").trim();
+  if (/^[-+]?\d+\s*\/\s*\d+$/.test(clean)) {
+    const [a, b] = clean.split("/").map(Number);
+    return b ? a / b : NaN;
+  }
+  return Number(clean.match(/[-+]?\d+(?:\.\d+)?/)?.[0]);
+}
+
+function sameNumericValue(a, b) {
+  const left = numericValue(a);
+  const right = numericValue(b);
+  return Number.isFinite(left) && Number.isFinite(right) && Math.abs(left - right) < 0.0001;
+}
+
 function isInvalidReviewerAssistedDraft(draft) {
   if (!draft || isInvalidReviewerAssistedDraftQuestion(draft.question)) return true;
   if (draft.category !== "Numerical Ability") return false;
+  const computed = arithmeticFromConcept(draft.question);
   return !draft.answer
+    || !computed
+    || !sameNumericValue(draft.answer, computed.value)
     || !isNumericChoiceText(draft.answer)
     || (draft.choices || []).length < 4
-    || (draft.choices || []).some((choice) => NUMERICAL_BANNED_CHOICE_WORDS.test(String(choice)) || !isNumericChoiceText(choice));
+    || (draft.choices || []).some((choice) => NUMERICAL_BANNED_CHOICE_WORDS.test(String(choice)) || !isNumericChoiceText(choice))
+    || (draft.choices || []).filter((choice) => sameNumericValue(choice, draft.answer)).length !== 1;
+}
+
+function formatNumericChoice(value, decimals = 2) {
+  return Number.isInteger(value) ? String(value) : String(Number(value.toFixed(decimals)));
 }
 
 function numericDistractors(answerValue, seedText) {
   const numeric = Number(answerValue);
-  if (!Number.isFinite(numeric)) return ["Cannot be determined", "0", "1"];
-  const offsets = [1, -1, 2, -2, 5, -5, 10, -10].map((offset) => numeric + offset).filter((item) => item !== numeric && item >= 0);
-  const placeError = numeric * 10;
-  const half = numeric / 2;
-  const candidates = [...offsets, placeError, half].filter((item) => Number.isFinite(item) && item !== numeric);
-  const unique = [...new Set(candidates.map((item) => Number.isInteger(item) ? String(item) : String(Number(item.toFixed(2)))))];
+  if (!Number.isFinite(numeric)) return [];
+  const decimals = String(answerValue).includes(".") ? 2 : 0;
+  const step = Math.abs(numeric) < 2 ? 0.25 : Math.abs(numeric) < 20 ? 1 : Math.max(1, Math.round(Math.abs(numeric) * 0.05));
+  const candidates = [-2, -1, 1, 2, 3, -3]
+    .map((multiplier) => numeric + (step * multiplier))
+    .filter((item) => Number.isFinite(item) && item >= 0 && Math.abs(item - numeric) > 0.0001);
+  const unique = [...new Set(candidates.map((item) => formatNumericChoice(item, decimals)))].filter((item) => !sameNumericValue(item, answerValue));
   return unique.sort((a, b) => hashText(`${seedText}-${a}`) - hashText(`${seedText}-${b}`)).slice(0, 3);
 }
 
@@ -2143,6 +2182,8 @@ function createReviewerAssistedQuestionDrafts({ importItem, existingQuestions, a
     });
     const qSig = questionSignature(question);
     const duplicates = existingQuestions.filter((item) => questionSignature(item) === qSig).slice(0, 3);
+    const computed = category === "Numerical Ability" ? arithmeticFromConcept(question.question) : null;
+    const validationPassed = category !== "Numerical Ability" || (!!computed && sameNumericValue(question.answer, computed.value) && !isInvalidReviewerAssistedDraft(question));
     return {
       ...question,
       draftId: id,
@@ -2155,6 +2196,12 @@ function createReviewerAssistedQuestionDrafts({ importItem, existingQuestions, a
       generatedBy: adminEmail || "Admin",
       dateGenerated: new Date().toISOString(),
       tags: [category, topic, bankDifficulty, "reviewer-assisted", source.concept],
+      validation: {
+        computedResult: computed?.value || "",
+        storedCorrectAnswer: question.answer,
+        generatedDistractors: question.choices.filter((choice) => !sameNumericValue(choice, question.answer)),
+        passed: validationPassed
+      },
       audit: {
         duplicateQuestions: duplicates.map((item) => item.id),
         duplicateDistractors: question.choices.filter((choice, choiceIndex, arr) => choice !== question.answer && arr.indexOf(choice) !== choiceIndex),
@@ -2785,6 +2832,10 @@ export default function App() {
 
   async function approveAiQuestion(draft) {
     if (!isAdmin || !draft) return;
+    if (isInvalidReviewerAssistedDraft(draft)) {
+      setAiStudioMessage("Approval blocked: this draft failed validation. Numerical drafts must have a computed answer that matches the stored correct answer and four numeric choices.");
+      return;
+    }
     const approved = { ...draft, status: "Approved", approvedBy: profile?.gmail_address || "Admin", approvedAt: new Date().toISOString() };
     const cloudPayload = {
       id: approved.id,
@@ -3464,7 +3515,7 @@ export default function App() {
         </div>
         <div className="mt-4 flex flex-wrap gap-3"><button onClick={generateAiStudioDrafts} className="rounded-2xl bg-white px-5 py-3 font-black text-slate-950">Generate Draft Content</button><button onClick={() => setAiStudioModule("AI Content Audit")} className="rounded-2xl border border-white/10 bg-white/10 px-5 py-3 font-bold">Open Content Audit</button></div>
         <div className="mt-5 grid gap-4 lg:grid-cols-[1.2fr_.8fr]">
-          <div className="rounded-2xl bg-slate-950/45 p-4"><h3 className="mb-3 font-black">Draft Question Review Queue</h3><div className="max-h-[520px] space-y-3 overflow-auto pr-1">{!aiDrafts.length && <p className="text-sm text-white/55">No AI question drafts yet.</p>}{aiDrafts.map((draft) => <div key={draft.draftId} className="rounded-2xl border border-white/10 bg-white/5 p-4"><div className="mb-2 flex flex-wrap gap-2"><Pill>{draft.status}</Pill><Pill>{draft.source || "AI"}</Pill><Pill>{draft.category}</Pill><Pill>{draft.subCategory}</Pill><Pill>{draft.difficulty}</Pill></div>{draft.sourceReviewerText && <div className="mb-3 rounded-xl border border-cyan-200/15 bg-cyan-300/10 p-3 text-xs text-cyan-50"><b>Original Reviewer Question</b><p className="mt-1 text-white/70">{draft.sourceReviewerText}</p><p className="mt-2 text-white/55">Reviewer: {draft.sourceReviewer} - Concept: {draft.sourceConcept} - Origin: {draft.sourceOrigin}</p></div>}<h4 className="font-black">{draft.question}</h4><p className="mt-3 text-xs font-black uppercase tracking-wide text-cyan-100">Generated Choices</p><div className="mt-2 grid gap-2 sm:grid-cols-2">{draft.choices.map((choice, idx) => <p key={`${draft.draftId}-${choice}`} className={`rounded-xl p-3 text-xs ${choice === draft.answer ? "bg-emerald-300/15 text-emerald-100" : "bg-slate-900/70 text-white/65"}`}>{choiceLetters[idx]}. {choice}</p>)}</div><p className="mt-3 text-xs font-black text-emerald-100">Computed Answer: {draft.answer}</p>{draft.category === "Numerical Ability" && <p className="mt-2 text-xs text-cyan-100">Generated Distractors: {draft.choices.filter((choice) => choice !== draft.answer).join(", ")}</p>}<p className="mt-3 text-xs font-black uppercase tracking-wide text-cyan-100">Generated Explanation</p><p className="mt-1 text-sm leading-6 text-white/65">{draft.explanation}</p><p className="mt-2 text-xs text-amber-100">Audit: {draft.audit?.notes} {draft.audit?.duplicateQuestions?.length ? `Matches: ${draft.audit.duplicateQuestions.join(", ")}` : ""}</p><div className="mt-3 flex flex-wrap gap-2"><button onClick={() => approveAiQuestion(draft)} disabled={draft.status === "Approved"} className="rounded-xl bg-emerald-400/20 px-3 py-2 text-xs font-bold text-emerald-100 disabled:opacity-40">Approve & Publish</button><button onClick={() => editAiDraft(draft.draftId)} className="rounded-xl bg-cyan-400/20 px-3 py-2 text-xs font-bold text-cyan-100">Edit</button><button onClick={() => updateAiDraftStatus(draft.draftId, "Rejected")} className="rounded-xl bg-red-400/20 px-3 py-2 text-xs font-bold text-red-100">Reject</button><button onClick={() => updateAiDraftStatus(draft.draftId, "Archived")} className="rounded-xl bg-white/10 px-3 py-2 text-xs font-bold">Archive</button></div></div>)}</div></div>
+          <div className="rounded-2xl bg-slate-950/45 p-4"><h3 className="mb-3 font-black">Draft Question Review Queue</h3><div className="max-h-[520px] space-y-3 overflow-auto pr-1">{!aiDrafts.length && <p className="text-sm text-white/55">No AI question drafts yet.</p>}{aiDrafts.map((draft) => <div key={draft.draftId} className="rounded-2xl border border-white/10 bg-white/5 p-4"><div className="mb-2 flex flex-wrap gap-2"><Pill>{draft.status}</Pill><Pill>{draft.source || "AI"}</Pill><Pill>{draft.category}</Pill><Pill>{draft.subCategory}</Pill><Pill>{draft.difficulty}</Pill></div>{draft.sourceReviewerText && <div className="mb-3 rounded-xl border border-cyan-200/15 bg-cyan-300/10 p-3 text-xs text-cyan-50"><b>Original Reviewer Question</b><p className="mt-1 text-white/70">{draft.sourceReviewerText}</p><p className="mt-2 text-white/55">Reviewer: {draft.sourceReviewer} - Concept: {draft.sourceConcept} - Origin: {draft.sourceOrigin}</p></div>}<h4 className="font-black">{draft.question}</h4><p className="mt-3 text-xs font-black uppercase tracking-wide text-cyan-100">Generated Choices</p><div className="mt-2 grid gap-2 sm:grid-cols-2">{draft.choices.map((choice, idx) => <p key={`${draft.draftId}-${choice}`} className={`rounded-xl p-3 text-xs ${choice === draft.answer ? "bg-emerald-300/15 text-emerald-100" : "bg-slate-900/70 text-white/65"}`}>{choiceLetters[idx]}. {choice}</p>)}</div><p className="mt-3 text-xs font-black text-emerald-100">Stored Correct Answer: {draft.answer}</p>{draft.category === "Numerical Ability" && <div className="mt-2 space-y-1 text-xs text-cyan-100"><p>Computed Result: {draft.validation?.computedResult || arithmeticFromConcept(draft.question)?.value || "Not computed"}</p><p>Generated Distractors: {(draft.validation?.generatedDistractors || draft.choices.filter((choice) => !sameNumericValue(choice, draft.answer))).join(", ")}</p><p>Validation Passed: {draft.validation?.passed ? "Yes" : "No"}</p></div>}<p className="mt-3 text-xs font-black uppercase tracking-wide text-cyan-100">Generated Explanation</p><p className="mt-1 text-sm leading-6 text-white/65">{draft.explanation}</p><p className="mt-2 text-xs text-amber-100">Audit: {draft.audit?.notes} {draft.audit?.duplicateQuestions?.length ? `Matches: ${draft.audit.duplicateQuestions.join(", ")}` : ""}</p><div className="mt-3 flex flex-wrap gap-2"><button onClick={() => approveAiQuestion(draft)} disabled={draft.status === "Approved"} className="rounded-xl bg-emerald-400/20 px-3 py-2 text-xs font-bold text-emerald-100 disabled:opacity-40">Approve & Publish</button><button onClick={() => editAiDraft(draft.draftId)} className="rounded-xl bg-cyan-400/20 px-3 py-2 text-xs font-bold text-cyan-100">Edit</button><button onClick={() => updateAiDraftStatus(draft.draftId, "Rejected")} className="rounded-xl bg-red-400/20 px-3 py-2 text-xs font-bold text-red-100">Reject</button><button onClick={() => updateAiDraftStatus(draft.draftId, "Archived")} className="rounded-xl bg-white/10 px-3 py-2 text-xs font-bold">Archive</button></div></div>)}</div></div>
           <div className="space-y-4"><div className="rounded-2xl bg-slate-950/45 p-4"><h3 className="mb-3 font-black">Lesson / Notes Drafts</h3><div className="max-h-64 space-y-3 overflow-auto pr-1">{!aiLessons.length && <p className="text-sm text-white/55">No AI lesson drafts yet.</p>}{aiLessons.map((draft) => <div key={draft.id} className="rounded-2xl bg-white/5 p-4"><div className="flex flex-wrap gap-2"><Pill>{draft.status}</Pill><Pill>{draft.topic}</Pill></div><p className="mt-2 text-sm text-white/65">{draft.content.lessonContent?.[0]}</p><div className="mt-3 flex flex-wrap gap-2"><button onClick={() => approveAiLesson(draft)} disabled={draft.status === "Approved"} className="rounded-xl bg-emerald-400/20 px-3 py-2 text-xs font-bold text-emerald-100 disabled:opacity-40">Approve Lesson</button><button onClick={() => updateAiDraftStatus(draft.id, "Archived")} className="rounded-xl bg-white/10 px-3 py-2 text-xs font-bold">Archive</button></div></div>)}</div></div><div className="rounded-2xl bg-slate-950/45 p-4"><h3 className="mb-3 font-black">Content Audit</h3><div className="max-h-72 space-y-2 overflow-auto pr-1">{aiAuditRows.slice().sort((a, b) => a.questions - b.questions).slice(0, 12).map((row) => <div key={`${row.category}-${row.topic}`} className="rounded-xl bg-white/5 p-3 text-sm"><b>{row.topic}</b><p className="text-xs text-white/50">{row.category} - {row.questions} questions - supports about {row.mockCapacity} full topic mock sets</p>{row.repeated.length > 0 && <p className="mt-1 text-xs text-amber-100">Repeated distractor watch: {row.repeated.map(([text, count]) => `${text} (${count})`).join("; ")}</p>}</div>)}</div></div><div className="rounded-2xl border border-amber-200/20 bg-amber-300/10 p-4"><h3 className="font-black">Future Automation Plan</h3><p className="mt-2 text-sm leading-6 text-white/70">Suggested scheduled job: every Sunday, generate 20 Current Events, 20 Government, 20 Constitution, and 20 Logic drafts. Keep them in Draft status until Admin approval.</p></div></div>
         </div>
       </section>
