@@ -1614,7 +1614,7 @@ function classifyReviewerQuestion(text, fallbackItem) {
 }
 
 function normalizeReviewerText(text) {
-  return text
+  const normalized = text
     .replace(/\r/g, "\n")
     .replace(/P\s*a\s*g\s*e\s*\|\s*\d+/gi, "\n")
     .replace(/[^\S\n]+/g, " ")
@@ -1623,8 +1623,33 @@ function normalizeReviewerText(text) {
     .replace(/([^\n])\s+((?:Q\s*)?\d{1,3})\s*(?:\.\s*\)|\)\s*|\.|\))\s+(?=[A-Z0-9(])/gi, "$1\n$2. ")
     .replace(/([^\n])\s+([A-Da-d])\s*[\.\)]\s+(?=\S)/g, "$1\n$2. ")
     .replace(/[ \t]+/g, " ")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
+    .replace(/\n{3,}/g, "\n\n");
+  return splitGluedQuestionNumberLines(normalized).trim();
+}
+
+function splitGluedQuestionNumberLines(text) {
+  const output = [];
+  let lastQuestionNumber = null;
+  text.split("\n").forEach((line) => {
+    const questionLine = line.match(/^\s*(?:Q\s*)?(\d{1,3})\s*(?:\.\s*\)|\)|\.)\s+/i);
+    if (questionLine) {
+      lastQuestionNumber = Number(questionLine[1]);
+      output.push(line);
+      return;
+    }
+    if (lastQuestionNumber && /^\s*[Dd]\s*[\.\)]\s*/.test(line)) {
+      const expected = lastQuestionNumber + 1;
+      const glued = line.match(new RegExp(`^(\\s*[Dd]\\s*[\\.)]\\s*[\\s\\S]*?)(${expected})(\\s*(?:\\.\\s*\\)|\\)|\\.)\\s+)([\\s\\S]+)$`));
+      if (glued) {
+        output.push(glued[1].trimEnd());
+        output.push(`${expected}. ${glued[4].trimStart()}`);
+        lastQuestionNumber = expected;
+        return;
+      }
+    }
+    output.push(line);
+  });
+  return output.join("\n").replace(/\n{3,}/g, "\n\n");
 }
 
 function extractAnswerKeyMap(text) {
@@ -1741,11 +1766,9 @@ function auditReviewerQuestionBlocks(text, starts) {
       : block.replace(/^\s*(?:Q\s*)?\d{1,3}\s*(?:\.\s*\)|\)|\.)\s*/, "").trim();
     let reason = "Accepted";
     if (!block.length) reason = "Rejected: empty question block";
-    else if (block.length < 10) reason = "Rejected: invalid block length";
     else if (!stem) reason = "Rejected: empty question text";
-    else if (stem.length < 12) reason = "Rejected: question text is too short";
     else if (!choiceRows.length) reason = "Rejected: no choices found";
-    else if (choiceRows.length < 2) reason = "Rejected: less than 2 choices";
+    else if (choiceRows.length < 4) reason = "Rejected: less than 4 choices";
     return {
       questionNumber: questionNumberFromToken(start[1]),
       startPosition: blockStart,
@@ -1789,11 +1812,11 @@ function extractActualReviewerQuestionsV2(text, importItem) {
     });
     const block = bodyText.slice(blockStart, blockEnd).trim();
     const choiceRows = extractChoicesFromBlock(block);
-    if (choiceRows.length < 2) return;
+    if (choiceRows.length < 4) return;
     const firstChoiceAt = choiceRows[0].index;
     const questionNumber = questionNumberFromToken(start[1]);
     const stem = block.slice(0, firstChoiceAt).replace(/^\s*(?:Q\s*)?\d{1,3}\s*(?:\.\s*\)|\)|\.)\s*/, "").trim();
-    if (!stem || stem.length < 12) return;
+    if (!stem) return;
     const choices = choiceRows.slice(0, 4).map((choice) => choice.text);
     const keyLetter = questionNumber ? answerKey[questionNumber] : "";
     const answer = keyLetter ? choices["ABCD".indexOf(keyLetter)] || "" : "";
