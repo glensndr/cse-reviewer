@@ -84,6 +84,31 @@ alter table public.question_bank add column if not exists correct_count integer 
 alter table public.question_bank add column if not exists wrong_count integer not null default 0;
 alter table public.question_bank add column if not exists difficulty_score numeric not null default 0;
 
+create table if not exists public.reviewer_ai_drafts (
+  id text primary key,
+  created_at timestamptz not null default now(),
+  source_reviewer text not null,
+  source_concept text not null,
+  category text not null,
+  topic text not null,
+  difficulty text not null,
+  question text not null,
+  choice_a text not null,
+  choice_b text not null,
+  choice_c text not null,
+  choice_d text not null,
+  correct_answer text not null,
+  explanation text not null,
+  status text not null default 'Draft',
+  generated_by text,
+  approved_by text,
+  approved_at timestamptz
+);
+
+create index if not exists reviewer_ai_drafts_status_idx on public.reviewer_ai_drafts (status, created_at desc);
+create index if not exists reviewer_ai_drafts_category_topic_idx on public.reviewer_ai_drafts (category, topic);
+create index if not exists reviewer_ai_drafts_source_idx on public.reviewer_ai_drafts (source_reviewer);
+
 create table if not exists public.lessons (
   id text primary key,
   category text not null,
@@ -162,6 +187,9 @@ create index if not exists user_progress_updated_at_idx on public.user_progress 
 create index if not exists question_bank_category_topic_idx on public.question_bank (category, sub_category);
 create index if not exists question_bank_difficulty_idx on public.question_bank (difficulty);
 create index if not exists question_bank_source_idx on public.question_bank (source);
+create index if not exists reviewer_ai_drafts_status_idx on public.reviewer_ai_drafts (status, created_at desc);
+create index if not exists reviewer_ai_drafts_category_topic_idx on public.reviewer_ai_drafts (category, topic);
+create index if not exists reviewer_ai_drafts_source_idx on public.reviewer_ai_drafts (source_reviewer);
 create index if not exists lessons_category_topic_idx on public.lessons (category, topic);
 create index if not exists mock_exams_user_created_idx on public.mock_exams (user_id, created_at desc);
 create index if not exists bookmarks_user_created_idx on public.bookmarks (user_id, created_at desc);
@@ -233,6 +261,7 @@ alter table public.users enable row level security;
 alter table public.user_profiles enable row level security;
 alter table public.user_progress enable row level security;
 alter table public.question_bank enable row level security;
+alter table public.reviewer_ai_drafts enable row level security;
 alter table public.lessons enable row level security;
 alter table public.mock_exams enable row level security;
 alter table public.bookmarks enable row level security;
@@ -249,6 +278,7 @@ drop policy if exists "profiles admin update" on public.user_profiles;
 drop policy if exists "progress own" on public.user_progress;
 drop policy if exists "question bank readable" on public.question_bank;
 drop policy if exists "question bank admin write" on public.question_bank;
+drop policy if exists "reviewer ai drafts admin only" on public.reviewer_ai_drafts;
 drop policy if exists "lessons readable" on public.lessons;
 drop policy if exists "lessons admin write" on public.lessons;
 drop policy if exists "mock exams own or admin" on public.mock_exams;
@@ -292,6 +322,9 @@ for select using (status = 'Approved' or public.is_admin());
 create policy "question bank admin write" on public.question_bank
 for all using (public.is_admin()) with check (public.is_admin());
 
+create policy "reviewer ai drafts admin only" on public.reviewer_ai_drafts
+for all using (public.is_admin()) with check (public.is_admin());
+
 create policy "lessons readable" on public.lessons
 for select using (status = 'Approved' or public.is_admin());
 
@@ -316,6 +349,7 @@ for all using (user_id = auth.uid() or public.is_admin()) with check (user_id = 
 grant usage on schema public to anon, authenticated;
 grant select on public.question_bank, public.lessons to anon, authenticated;
 grant insert, update, delete on public.question_bank, public.lessons to authenticated;
+grant select, insert, update, delete on public.reviewer_ai_drafts to authenticated;
 grant select, insert, update, delete on
   public.users,
   public.user_profiles,

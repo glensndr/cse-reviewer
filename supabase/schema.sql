@@ -59,6 +59,27 @@ create table if not exists public.question_bank (
   created_at timestamptz not null default now()
 );
 
+create table if not exists public.reviewer_ai_drafts (
+  id text primary key,
+  created_at timestamptz not null default now(),
+  source_reviewer text not null,
+  source_concept text not null,
+  category text not null,
+  topic text not null,
+  difficulty text not null,
+  question text not null,
+  choice_a text not null,
+  choice_b text not null,
+  choice_c text not null,
+  choice_d text not null,
+  correct_answer text not null,
+  explanation text not null,
+  status text not null default 'Draft',
+  generated_by text,
+  approved_by text,
+  approved_at timestamptz
+);
+
 create table if not exists public.lessons (
   id text primary key,
   category text not null,
@@ -127,6 +148,7 @@ alter table public.users enable row level security;
 alter table public.user_profiles enable row level security;
 alter table public.user_progress enable row level security;
 alter table public.question_bank enable row level security;
+alter table public.reviewer_ai_drafts enable row level security;
 alter table public.lessons enable row level security;
 alter table public.mock_exams enable row level security;
 alter table public.bookmarks enable row level security;
@@ -156,6 +178,7 @@ drop policy if exists "profiles admin update" on public.user_profiles;
 drop policy if exists "progress own" on public.user_progress;
 drop policy if exists "question bank readable" on public.question_bank;
 drop policy if exists "question bank admin write" on public.question_bank;
+drop policy if exists "reviewer ai drafts admin only" on public.reviewer_ai_drafts;
 drop policy if exists "lessons readable" on public.lessons;
 drop policy if exists "lessons admin write" on public.lessons;
 drop policy if exists "mock exams own or admin" on public.mock_exams;
@@ -184,6 +207,7 @@ with check (public.is_admin());
 create policy "progress own" on public.user_progress for all using (user_id = auth.uid()) with check (user_id = auth.uid());
 create policy "question bank readable" on public.question_bank for select using (status = 'Approved' or public.is_admin());
 create policy "question bank admin write" on public.question_bank for all using (public.is_admin()) with check (public.is_admin());
+create policy "reviewer ai drafts admin only" on public.reviewer_ai_drafts for all using (public.is_admin()) with check (public.is_admin());
 create policy "lessons readable" on public.lessons for select using (status = 'Approved' or public.is_admin());
 create policy "lessons admin write" on public.lessons for all using (public.is_admin()) with check (public.is_admin());
 create policy "mock exams own or admin" on public.mock_exams for all using (user_id = auth.uid() or public.is_admin()) with check (user_id = auth.uid() or public.is_admin());
@@ -195,6 +219,7 @@ create policy "device sessions own or admin" on public.device_sessions for all u
 grant usage on schema public to anon, authenticated;
 grant select on public.question_bank, public.lessons to anon, authenticated;
 grant insert, update, delete on public.question_bank, public.lessons to authenticated;
+grant select, insert, update, delete on public.reviewer_ai_drafts to authenticated;
 
 create or replace function public.handle_new_user()
 returns trigger

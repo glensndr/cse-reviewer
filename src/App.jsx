@@ -38,6 +38,7 @@ const MOCK_EXAM_MODES = Array.from({ length: 10 }, (_, i) => `Mock Exam ${i + 1}
 const FOUNDING_MEMBER_LIMIT = 30;
 const QUESTION_BANK_SELECT_WITH_STATUS = "id,category,sub_category,difficulty,question,choices,answer,explanation,hint,learning_tip,source,status";
 const QUESTION_BANK_SELECT_CORE = "id,category,sub_category,difficulty,question,choices,answer,explanation,hint,learning_tip,source";
+const REVIEWER_AI_DRAFT_SELECT = "id,created_at,source_reviewer,source_concept,category,topic,difficulty,question,choice_a,choice_b,choice_c,choice_d,correct_answer,explanation,status,generated_by,approved_by,approved_at";
 
 const CATEGORIES = [
   {
@@ -1878,6 +1879,60 @@ function toQuestionBankRow(q, meta = {}) {
   };
 }
 
+function draftToReviewerAiRow(draft, status = draft.status || "Draft", adminEmail = draft.generatedBy || "Admin") {
+  return {
+    id: draft.draftId || draft.id,
+    source_reviewer: draft.sourceReviewer || draft.source || "AI Content Studio",
+    source_concept: draft.sourceConcept || draft.subCategory || draft.category,
+    category: draft.category,
+    topic: draft.subCategory,
+    difficulty: draft.difficulty,
+    question: draft.question.replace(/^Item\s+[A-Z0-9-]+:\s*/i, ""),
+    choice_a: draft.choices?.[0] || "",
+    choice_b: draft.choices?.[1] || "",
+    choice_c: draft.choices?.[2] || "",
+    choice_d: draft.choices?.[3] || "",
+    correct_answer: draft.answer,
+    explanation: draft.explanation,
+    status,
+    generated_by: draft.generatedBy || adminEmail || "Admin",
+    approved_by: status === "Approved" ? adminEmail : draft.approvedBy || null,
+    approved_at: status === "Approved" ? new Date().toISOString() : draft.approvedAt || null
+  };
+}
+
+function reviewerAiRowToDraft(row) {
+  const choices = [row.choice_a, row.choice_b, row.choice_c, row.choice_d].filter(Boolean);
+  const question = makeQuestion({
+    id: row.id,
+    category: row.category,
+    subCategory: row.topic,
+    difficulty: row.difficulty,
+    question: row.question,
+    choices,
+    answer: row.correct_answer,
+    explanation: row.explanation,
+    hint: `Trace this draft back to the reviewer concept: ${row.source_concept}.`,
+    learningTip: "Approve only after verifying the item accurately reflects the reviewer source."
+  });
+  return {
+    ...question,
+    draftId: row.id,
+    source: row.source_reviewer === "AI Content Studio" ? "AI" : "Reviewer Assisted AI",
+    status: row.status,
+    sourceReviewer: row.source_reviewer,
+    sourceConcept: row.source_concept,
+    sourceReviewerText: row.source_concept,
+    sourceOrigin: "Persistent Draft",
+    generatedBy: row.generated_by,
+    dateGenerated: row.created_at,
+    approvedBy: row.approved_by,
+    approvedAt: row.approved_at,
+    tags: [row.category, row.topic, row.difficulty, "reviewer-ai-draft", row.source_concept].filter(Boolean),
+    audit: { duplicateQuestions: [], duplicateDistractors: [], notes: "Loaded from persistent reviewer_ai_drafts table." }
+  };
+}
+
 const AI_STUDIO_MODULES = ["AI Question Generator", "AI Lesson Generator", "AI Review Notes Generator", "AI Current Events Generator", "AI Content Audit"];
 const AI_COUNTS = [10, 20, 30, 50];
 const AI_DIFFICULTIES = ["Easy", "Moderate", "Difficult"];
@@ -2295,6 +2350,7 @@ export default function App() {
   const [loginHistory, setLoginHistory] = useState([]);
   const [deviceSessions, setDeviceSessions] = useState([]);
   const [cloudQuestionRows, setCloudQuestionRows] = useState([]);
+  const [reviewerAiDraftRows, setReviewerAiDraftRows] = useState([]);
   const [cloudLoading, setCloudLoading] = useState(true);
   const [accessMessage, setAccessMessage] = useState("");
   const cloudRefreshInFlightRef = useRef(false);
@@ -2346,6 +2402,19 @@ export default function App() {
     setSupabaseError("question bank core fetch failed", result.error);
     const rows = result.data || [];
     setCloudQuestionRows(rows);
+    return rows;
+  }
+
+  async function loadReviewerAiDraftRows() {
+    if (!supabase) return [];
+    const result = await supabase
+      .from("reviewer_ai_drafts")
+      .select(REVIEWER_AI_DRAFT_SELECT)
+      .order("created_at", { ascending: false })
+      .limit(500);
+    setSupabaseError("reviewer AI drafts fetch failed", result.error);
+    const rows = result.data || [];
+    if (!result.error) setReviewerAiDraftRows(rows);
     return rows;
   }
 
@@ -2455,7 +2524,10 @@ export default function App() {
       setDeviceSessions(deviceRows || []);
       setCloudQuestionRows(questionRows || []);
       await registerDeviceSession(userId);
-      if (profileRow?.role === "Admin") await loadAdminUsers();
+      if (profileRow?.role === "Admin") {
+        await loadAdminUsers();
+        await loadReviewerAiDraftRows();
+      }
       loadedSessionKeyRef.current = sessionKey;
       setScreen("dashboard");
     } finally {
@@ -2584,7 +2656,21 @@ export default function App() {
     }
   }
 
-  function generateAiStudioDrafts() {
+  async function persistReviewerAiDrafts(drafts) {
+    if (!supabase || !isAdmin || !drafts.length) return false;
+    const rows = drafts.map((draft) => draftToReviewerAiRow(draft, "Draft", profile?.gmail_address));
+    const result = await supabase.from("reviewer_ai_drafts").upsert(rows, { onConflict: "id" }).select(REVIEWER_AI_DRAFT_SELECT);
+    setSupabaseError("reviewer AI drafts upsert failed", result.error);
+    if (result.error) return false;
+    setReviewerAiDraftRows((current) => {
+      const incoming = result.data || rows;
+      const incomingIds = new Set(incoming.map((row) => row.id));
+      return [...incoming, ...current.filter((row) => !incomingIds.has(row.id))];
+    });
+    return true;
+  }
+
+  async function generateAiStudioDrafts() {
     if (!isAdmin) return;
     setAiStudioMessage("");
     if (aiStudioModule === "AI Question Generator" || aiStudioModule === "AI Current Events Generator") {
@@ -2598,8 +2684,9 @@ export default function App() {
         existingQuestions: allQuestions,
         adminEmail: profile?.gmail_address
       });
-      setProgress((p) => ({ ...p, aiDrafts: [...drafts, ...(p.aiDrafts || [])].slice(0, 250) }));
-      setAiStudioMessage(`${drafts.length} AI question drafts created. Review, edit, and approve before students can see them.`);
+      const persisted = await persistReviewerAiDrafts(drafts);
+      if (!persisted) setProgress((p) => ({ ...p, aiDrafts: [...drafts, ...(p.aiDrafts || [])].slice(0, 250) }));
+      setAiStudioMessage(persisted ? `${drafts.length} AI question drafts saved to reviewer_ai_drafts. Review, edit, and approve before students can see them.` : `${drafts.length} AI question drafts created locally. Run the reviewer_ai_drafts schema migration to persist them across sessions.`);
       return;
     }
     const lesson = createAiLessonDraft({ category: aiStudioCategory, topic: aiStudioTopic, adminEmail: profile?.gmail_address });
@@ -2607,7 +2694,7 @@ export default function App() {
     setAiStudioMessage("AI lesson/review draft created. Review and approve before publishing to lessons.");
   }
 
-  function generateReviewerAssistedDrafts(importItem) {
+  async function generateReviewerAssistedDrafts(importItem) {
     if (!isAdmin || !importItem) return;
     const drafts = createReviewerAssistedQuestionDrafts({
       importItem,
@@ -2619,12 +2706,25 @@ export default function App() {
       setImportMessage(`No usable reviewer concepts were found in ${importItem.name}. Re-upload a PDF/DOCX/TXT with readable text or inspect the raw extraction output.`);
       return;
     }
-    setProgress((p) => ({ ...p, aiDrafts: [...drafts, ...(p.aiDrafts || [])].slice(0, 250) }));
-    setImportMessage(`${drafts.length} reviewer-assisted draft questions created from ${importItem.name}. Review them in AI Content Studio before approving to the question bank.`);
-    setAiStudioMessage(`${drafts.length} reviewer-assisted drafts are ready for admin review. They are not visible to students until approved.`);
+    const persisted = await persistReviewerAiDrafts(drafts);
+    if (!persisted) setProgress((p) => ({ ...p, aiDrafts: [...drafts, ...(p.aiDrafts || [])].slice(0, 250) }));
+    setImportMessage(persisted ? `${drafts.length} reviewer-assisted draft questions saved to reviewer_ai_drafts from ${importItem.name}. Review them in AI Content Studio before approving to the question bank.` : `${drafts.length} reviewer-assisted draft questions created locally. Deploy the reviewer_ai_drafts table to persist them.`);
+    setAiStudioMessage(persisted ? `${drafts.length} reviewer-assisted drafts are saved in Supabase and ready for admin review. They are not visible to students until approved.` : `${drafts.length} reviewer-assisted drafts are local only until the reviewer_ai_drafts schema is deployed.`);
   }
 
-  function updateAiDraftStatus(draftId, status) {
+  async function updateAiDraftStatus(draftId, status) {
+    if (supabase && isAdmin) {
+      const patch = { status };
+      if (status === "Approved") {
+        patch.approved_by = profile?.gmail_address || "Admin";
+        patch.approved_at = new Date().toISOString();
+      }
+      const result = await supabase.from("reviewer_ai_drafts").update(patch).eq("id", draftId).select(REVIEWER_AI_DRAFT_SELECT);
+      setSupabaseError("reviewer AI draft status update failed", result.error);
+      if (!result.error && result.data?.[0]) {
+        setReviewerAiDraftRows((rows) => rows.map((row) => row.id === draftId ? result.data[0] : row));
+      }
+    }
     setProgress((p) => ({
       ...p,
       aiDrafts: (p.aiDrafts || []).map((draft) => draft.draftId === draftId ? { ...draft, status } : draft),
@@ -2632,11 +2732,18 @@ export default function App() {
     }));
   }
 
-  function editAiDraft(draftId) {
-    const current = (progress.aiDrafts || []).find((draft) => draft.draftId === draftId);
+  async function editAiDraft(draftId) {
+    const current = reviewerAiDraftRows.find((row) => row.id === draftId)
+      ? reviewerAiRowToDraft(reviewerAiDraftRows.find((row) => row.id === draftId))
+      : (progress.aiDrafts || []).find((draft) => draft.draftId === draftId);
     if (!current) return;
     const updatedQuestion = window.prompt("Edit question text before approval:", current.question.replace(/^Item\s+[A-Z0-9-]+:\s*/i, ""));
     if (!updatedQuestion) return;
+    if (supabase && isAdmin) {
+      const result = await supabase.from("reviewer_ai_drafts").update({ question: updatedQuestion, status: "Draft" }).eq("id", draftId).select(REVIEWER_AI_DRAFT_SELECT);
+      setSupabaseError("reviewer AI draft edit failed", result.error);
+      if (!result.error && result.data?.[0]) setReviewerAiDraftRows((rows) => rows.map((row) => row.id === draftId ? result.data[0] : row));
+    }
     setProgress((p) => ({
       ...p,
       aiDrafts: (p.aiDrafts || []).map((draft) => draft.draftId === draftId ? { ...draft, question: `Item ${draft.id}: ${updatedQuestion}`, status: "Draft" } : draft)
@@ -2687,7 +2794,7 @@ export default function App() {
       } else saved = true;
     }
     setCloudQuestionRows((rows) => [{ ...cloudPayload, sub_category: cloudPayload.sub_category, learning_tip: cloudPayload.learning_tip }, ...rows.filter((row) => row.id !== cloudPayload.id)]);
-    updateAiDraftStatus(draft.draftId, saved ? "Approved" : "Approved");
+    await updateAiDraftStatus(draft.draftId, "Approved");
     setAiStudioMessage(saved ? "Question approved and published to the existing question bank." : "Question approved locally. Run the AI schema migration if Supabase publish is blocked by RLS or missing columns.");
   }
 
@@ -3298,7 +3405,9 @@ export default function App() {
     const difficultyStats = DIFFICULTIES.map((difficulty) => ({ name: difficulty, count: baseQuestions.filter((q) => q.difficulty === difficulty).length }));
     const searchedUsers = cloudUsers.filter((user) => `${user.full_name} ${user.gmail_address} ${user.status}`.toLowerCase().includes(adminSearch.toLowerCase()));
     const pendingUsers = searchedUsers.filter((user) => ["Trial Pending", "Trial Active"].includes(user.status));
-    const aiDrafts = progress.aiDrafts || [];
+    const persistentDrafts = reviewerAiDraftRows.map(reviewerAiRowToDraft);
+    const persistentDraftIds = new Set(persistentDrafts.map((draft) => draft.draftId));
+    const aiDrafts = [...persistentDrafts, ...(progress.aiDrafts || []).filter((draft) => !persistentDraftIds.has(draft.draftId))];
     const aiLessons = progress.aiLessons || [];
     const aiAuditRows = contentAuditReport(allQuestions);
     const aiTopics = CATEGORIES.find((cat) => cat.name === aiStudioCategory)?.subs || [];
@@ -3311,7 +3420,7 @@ export default function App() {
         <div className="mt-5 rounded-2xl bg-slate-900/45 p-4"><h3 className="mb-3 font-black">Question Counts by Subcategory</h3><div className="grid max-h-72 gap-2 overflow-auto pr-1 sm:grid-cols-2 lg:grid-cols-4">{topicStats.map((s) => <div key={`${s.category}-${s.name}`} className="rounded-xl bg-white/5 p-3"><div className="text-sm font-bold">{s.name}</div><div className="text-xs text-white/45">{s.category}</div><div className="mt-1 text-lg font-black">{s.count}</div></div>)}</div></div>
       </div>
       <section className="mt-5 rounded-[2rem] border border-cyan-200/20 bg-cyan-300/10 p-6 backdrop-blur-xl">
-        <div className="flex flex-wrap items-start justify-between gap-4"><div><p className="text-cyan-100">Admin Only</p><h2 className="text-3xl font-black">AI Content Studio</h2><p className="mt-2 max-w-3xl text-sm text-white/65">Generate draft questions, lessons, notes, strategies, and current-events content. Drafts are never available to students until an Admin approves and publishes them into the existing question bank or lesson library.</p></div><Pill>{aiDrafts.filter((d) => d.status === "Draft").length} question drafts</Pill></div>
+        <div className="flex flex-wrap items-start justify-between gap-4"><div><p className="text-cyan-100">Admin Only</p><h2 className="text-3xl font-black">AI Content Studio</h2><p className="mt-2 max-w-3xl text-sm text-white/65">Generate draft questions, lessons, notes, strategies, and current-events content. Drafts are never available to students until an Admin approves and publishes them into the existing question bank or lesson library.</p></div><div className="flex flex-wrap gap-2"><Pill>{aiDrafts.filter((d) => d.status === "Draft").length} Draft Questions</Pill><Pill>{aiDrafts.filter((d) => d.status === "Draft").length} Pending Review</Pill><Pill>{aiDrafts.filter((d) => d.status === "Approved").length} Approved</Pill><Pill>{aiDrafts.filter((d) => d.status === "Rejected").length} Rejected</Pill></div></div>
         {aiStudioMessage && <div className="mt-4 rounded-2xl border border-emerald-200/30 bg-emerald-300/10 p-3 text-sm text-emerald-100">{aiStudioMessage}</div>}
         <div className="mt-5 grid gap-3 lg:grid-cols-5">
           <label className="text-xs font-black uppercase tracking-wide text-cyan-100">Module<select value={aiStudioModule} onChange={(e) => setAiStudioModule(e.target.value)} className="mt-2 min-h-12 w-full rounded-2xl border border-white/10 bg-slate-900 px-3 text-sm text-white">{AI_STUDIO_MODULES.map((item) => <option key={item}>{item}</option>)}</select></label>
