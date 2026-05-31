@@ -1654,15 +1654,43 @@ function splitGluedQuestionNumberLines(text) {
   return output.join("\n").replace(/\n{3,}/g, "\n\n");
 }
 
-function extractAnswerKeyMap(text) {
+function answerKeyChoiceToLetter(value) {
+  const normalized = String(value || "").trim().toUpperCase();
+  if (/^[A-D]$/.test(normalized)) return normalized;
+  if (/^[1-4]$/.test(normalized)) return "ABCD"[Number(normalized) - 1];
+  return "";
+}
+
+function extractAnswerKeyInfo(text) {
   const keyMap = {};
+  const sequentialChoices = [];
   const keyMatch = text.match(/(?:^|\n)\s*(?:ANSWER\s*KEY|ANSWERS?|CORRECT\s+ANSWERS?|CORRECT\s+ANSWER|KEY\s*TO\s*CORRECTION)\s*:?\s*([\s\S]*)$/i);
-  if (!keyMatch) return keyMap;
+  if (!keyMatch) return { byQuestionNumber: keyMap, sequentialChoices, raw: "", source: "" };
   const keyText = keyMatch[1].slice(0, 8000);
-  for (const match of keyText.matchAll(/(?:^|\s)(\d{1,3})\s*(?:[\.\)\-:]\s*)?([A-D])\b/gi)) {
-    keyMap[Number(match[1])] = match[2].toUpperCase();
+  for (const match of keyText.matchAll(/(?:^|\s)(\d{1,3})\s*(?:[\.\)\-:]\s*)?([A-D]|[1-4])\b/gi)) {
+    const letter = answerKeyChoiceToLetter(match[2]);
+    if (letter) keyMap[Number(match[1])] = letter;
   }
-  return keyMap;
+  const compactLine = keyText
+    .split("\n")
+    .map((line) => line.trim())
+    .find((line) => /^(?:[A-Da-d1-4]\s*,\s*){3,}[A-Da-d1-4]\b/.test(line));
+  if (compactLine) {
+    (compactLine.match(/[A-Da-d1-4]/g) || [])
+      .map(answerKeyChoiceToLetter)
+      .filter(Boolean)
+      .forEach((letter) => sequentialChoices.push(letter));
+  }
+  return {
+    byQuestionNumber: keyMap,
+    sequentialChoices,
+    raw: keyText.slice(0, 1200),
+    source: sequentialChoices.length ? "compact_sequence" : Object.keys(keyMap).length ? "numbered_answer_key" : ""
+  };
+}
+
+function extractAnswerKeyMap(text) {
+  return extractAnswerKeyInfo(text).byQuestionNumber;
 }
 
 function trimAnswerKeyText(text) {
@@ -1869,7 +1897,8 @@ function extractActualReviewerQuestionsV2(text, importItem) {
     empty.parseStats = emptyStats;
     return empty;
   }
-  const answerKey = extractAnswerKeyMap(normalized);
+  const answerKeyInfo = extractAnswerKeyInfo(normalized);
+  const answerKey = answerKeyInfo.byQuestionNumber;
   const bodyText = trimAnswerKeyText(normalized);
   const starts = findReviewerQuestionStarts(bodyText);
   const questions = [];
@@ -1911,9 +1940,34 @@ function extractActualReviewerQuestionsV2(text, importItem) {
       learningTip: "Re-answer the original reviewer item until you can explain why the keyed answer is correct.",
       sourceSection: mapped.heading,
       questionNumber,
+      answerKeyChoice: keyLetter,
+      confidenceScore: answer ? 1 : 0,
+      answerSource: answer ? "reviewer_answer_key" : "pending_review",
       missingAnswer: !answer
     });
   });
+  const canAutoLinkSequentialKey = answerKeyInfo.sequentialChoices.length === questions.length && questions.length > 0;
+  if (canAutoLinkSequentialKey) {
+    questions.forEach((question, index) => {
+      const keyLetter = answerKeyInfo.sequentialChoices[index];
+      const linkedAnswer = question.choices["ABCD".indexOf(keyLetter)] || "";
+      if (!linkedAnswer) return;
+      question.answer = linkedAnswer;
+      question.answerKeyChoice = keyLetter;
+      question.confidenceScore = 1;
+      question.answerSource = "reviewer_answer_key";
+      question.missingAnswer = false;
+      question.explanation = `Imported directly from ${importItem.name}. The reviewer answer key marks choice ${keyLetter}.`;
+    });
+  } else if (answerKeyInfo.sequentialChoices.length) {
+    questions.forEach((question) => {
+      if (!question.answer) {
+        question.confidenceScore = 0;
+        question.answerSource = "pending_review";
+        question.missingAnswer = true;
+      }
+    });
+  }
   const seen = new Set();
   const unique = questions.filter((q) => {
     const key = `${q.question.toLowerCase()}|${q.choices.join("|").toLowerCase()}`;
@@ -1929,6 +1983,9 @@ function extractActualReviewerQuestionsV2(text, importItem) {
     questionsWithChoices: unique.length,
     questionsWithAnswerKeys: unique.filter((q) => q.answer).length,
     questionsWithoutAnswerKeys: unique.filter((q) => !q.answer).length,
+    answerKeySource: answerKeyInfo.source || "none",
+    answerKeyCount: answerKeyInfo.sequentialChoices.length || Object.keys(answerKey).length,
+    answerKeyMatchedQuestionCount: canAutoLinkSequentialKey,
     sectionsDetected: detectedSections
   };
   return unique;
@@ -1951,7 +2008,9 @@ function toQuestionBankRow(q, meta = {}) {
     tags: meta.tags || [q.category, q.subCategory],
     date_generated: meta.dateGenerated || new Date().toISOString(),
     approved_by: meta.approvedBy || "Admin",
-    approved_at: meta.approvedAt || new Date().toISOString()
+    approved_at: meta.approvedAt || new Date().toISOString(),
+    confidence_score: q.confidenceScore ?? (q.answer ? 1 : 0),
+    answer_source: q.answerSource || (q.answer ? "reviewer_answer_key" : "pending_review")
   };
 }
 
@@ -3631,6 +3690,8 @@ export default function App() {
                   <span className="rounded-xl bg-white/5 p-2">With choices: {stats.questionsWithChoices || detectedCount}</span>
                   <span className="rounded-xl bg-white/5 p-2">With answers: {stats.questionsWithAnswerKeys || 0}</span>
                   <span className="rounded-xl bg-white/5 p-2">Missing answers: {stats.questionsWithoutAnswerKeys || 0}</span>
+                  <span className="rounded-xl bg-white/5 p-2">Answer key: {stats.answerKeyCount || 0} ({stats.answerKeySource || "none"})</span>
+                  <span className="rounded-xl bg-white/5 p-2">Key matched: {stats.answerKeyMatchedQuestionCount ? "Yes" : "No"}</span>
                   <span className="rounded-xl bg-white/5 p-2">Sections: {(stats.sectionsDetected || []).length}</span>
                 </div>
                 {!!Object.keys(sectionCounts).length && <div className="mt-3 flex flex-wrap gap-2">{Object.entries(sectionCounts).map(([name, count]) => <Pill key={name}>{name}: {count}</Pill>)}</div>}
@@ -3641,6 +3702,7 @@ export default function App() {
                     {(item.extractedQuestions || []).slice(0, 20).map((q) => <div key={q.id} className="rounded-xl bg-white/5 p-3">
                       <p className="font-bold text-white/80">{q.questionNumber ? `${q.questionNumber}. ` : ""}{q.question}</p>
                       <p className="mt-1 text-white/45">Choices: {q.choices.length} - Format: {q.choiceFormat || "A-D"} - {q.category} - {q.subCategory} - {q.answer ? "Approved" : "Pending Review"}</p>
+                      {q.answer && <p className="mt-1 text-emerald-200/80">Correct: {q.answerKeyChoice || ""} - {q.answer} ({q.answerSource || "reviewer_answer_key"}, confidence {Math.round((q.confidenceScore ?? 1) * 100)}%)</p>}
                       <div className="mt-2 grid gap-1 sm:grid-cols-2">{q.choices.map((choice, idx) => <span key={`${q.id}-${choice}`} className="rounded-lg bg-slate-900/70 p-2">{choiceLetters[idx]}. {choice}</span>)}</div>
                     </div>)}
                   </div>

@@ -66,6 +66,8 @@ create table if not exists public.question_bank (
   date_generated timestamptz,
   approved_by text,
   approved_at timestamptz,
+  confidence_score numeric not null default 0,
+  answer_source text not null default 'pending_review',
   times_answered integer not null default 0,
   correct_count integer not null default 0,
   wrong_count integer not null default 0,
@@ -79,6 +81,8 @@ alter table public.question_bank add column if not exists tags jsonb not null de
 alter table public.question_bank add column if not exists date_generated timestamptz;
 alter table public.question_bank add column if not exists approved_by text;
 alter table public.question_bank add column if not exists approved_at timestamptz;
+alter table public.question_bank add column if not exists confidence_score numeric not null default 0;
+alter table public.question_bank add column if not exists answer_source text not null default 'pending_review';
 alter table public.question_bank add column if not exists times_answered integer not null default 0;
 alter table public.question_bank add column if not exists correct_count integer not null default 0;
 alter table public.question_bank add column if not exists wrong_count integer not null default 0;

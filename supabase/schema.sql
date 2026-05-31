@@ -52,6 +52,8 @@ create table if not exists public.question_bank (
   date_generated timestamptz,
   approved_by text,
   approved_at timestamptz,
+  confidence_score numeric not null default 0,
+  answer_source text not null default 'pending_review',
   times_answered integer not null default 0,
   correct_count integer not null default 0,
   wrong_count integer not null default 0,
