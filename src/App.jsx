@@ -1656,7 +1656,7 @@ function splitGluedQuestionNumberLines(text) {
 
 function extractAnswerKeyMap(text) {
   const keyMap = {};
-  const keyMatch = text.match(/(?:ANSWER\s*KEY|ANSWERS?|KEY\s*TO\s*CORRECTION)([\s\S]*)$/i);
+  const keyMatch = text.match(/(?:^|\n)\s*(?:ANSWER\s*KEY|ANSWERS?|CORRECT\s+ANSWERS?|CORRECT\s+ANSWER|KEY\s*TO\s*CORRECTION)\s*:?\s*([\s\S]*)$/i);
   if (!keyMatch) return keyMap;
   const keyText = keyMatch[1].slice(0, 8000);
   for (const match of keyText.matchAll(/(?:^|\s)(\d{1,3})\s*(?:[\.\)\-:]\s*)?([A-D])\b/gi)) {
@@ -1666,7 +1666,7 @@ function extractAnswerKeyMap(text) {
 }
 
 function trimAnswerKeyText(text) {
-  return text.replace(/(?:ANSWER\s*KEY|ANSWERS?|KEY\s*TO\s*CORRECTION)[\s\S]*$/i, "").trim();
+  return text.replace(/(?:^|\n)\s*(?:ANSWER\s*KEY|ANSWERS?|CORRECT\s+ANSWERS?|CORRECT\s+ANSWER|KEY\s*TO\s*CORRECTION)\s*:?\s*[\s\S]*$/i, "").trim();
 }
 
 function questionNumberFromToken(token) {
@@ -1678,6 +1678,7 @@ const QUESTION_NUMBER_REGEX_TEXT = String.raw`(?:^|\n)\s*((?:[Qq]\s*)?\d{1,3})\s
 const ANSWER_CHOICE_REGEX_TEXT = String.raw`(?:^|\n)\s*([A-Da-d]|[1-4])\s*[\.\)]\s+`;
 const QUESTION_NUMBER_REGEX = /(?:^|\n)\s*((?:[Qq]\s*)?\d{1,3})\s*(?:\.\s*\)|\)|\.)\s+(?=[A-Z0-9(])/g;
 const ANSWER_CHOICE_REGEX = /(?:^|\n)\s*([A-Da-d]|[1-4])\s*[\.\)]\s+/gi;
+const NUMBERED_MARKER_REGEX = /(?:^|\n)\s*((?:[Qq]\s*)?\d{1,3})\s*(?:\.\s*\)|\)|\.)\s+/g;
 
 function previewAround(text, index, length = 180) {
   const start = Math.max(0, index - 45);
@@ -1695,6 +1696,7 @@ function firstRegexMatches(text, regex, count = 5) {
 
 function parserDebugReport(rawText) {
   const cleaned = normalizeReviewerText(rawText || "");
+  const questionBody = trimAnswerKeyText(cleaned);
   const questionMatches = firstRegexMatches(cleaned, QUESTION_NUMBER_REGEX);
   const choiceMatches = firstRegexMatches(cleaned, ANSWER_CHOICE_REGEX);
   const candidateMatches = [...cleaned.matchAll(QUESTION_NUMBER_REGEX)].slice(0, 5).map((match) => {
@@ -1707,12 +1709,12 @@ function parserDebugReport(rawText) {
       tail: tail.replace(/\n/g, "\\n")
     };
   });
-  const starts = findReviewerQuestionStarts(cleaned);
-  const blockAudit = auditReviewerQuestionBlocks(cleaned, starts);
+  const starts = findReviewerQuestionStarts(questionBody);
+  const blockAudit = auditReviewerQuestionBlocks(questionBody, starts);
   const blocks = starts.slice(0, 5).map((start, index) => {
     const blockStart = start.index || 0;
-    const blockEnd = starts[index + 1]?.index ?? cleaned.length;
-    return cleaned.slice(blockStart, blockEnd).trim().slice(0, 700);
+    const blockEnd = starts[index + 1]?.index ?? questionBody.length;
+    return questionBody.slice(blockStart, blockEnd).trim().slice(0, 700);
   });
   return {
     regex: { questionNumbers: QUESTION_NUMBER_REGEX_TEXT, answerChoices: ANSWER_CHOICE_REGEX_TEXT },
@@ -1735,26 +1737,75 @@ function parserDebugReport(rawText) {
 }
 
 function findReviewerQuestionStarts(text) {
-  const matches = [...text.matchAll(QUESTION_NUMBER_REGEX)];
-  const numbered = matches.filter((match) => questionNumberFromToken(match[1]));
-  return numbered.filter((match, index) => {
-    const current = questionNumberFromToken(match[1]);
-    const previous = index ? questionNumberFromToken(numbered[index - 1][1]) : null;
-    const next = numbered[index + 1] ? questionNumberFromToken(numbered[index + 1][1]) : null;
-    const windowFour = numbered.slice(index, index + 4).map((item) => questionNumberFromToken(item[1]));
-    if (windowFour.join(",") === "1,2,3,4" && previous && previous !== 0) return false;
-    const sequenceStart = index - current + 1;
-    if ([2, 3, 4].includes(current) && sequenceStart >= 0) {
-      const sequence = numbered.slice(sequenceStart, sequenceStart + 4).map((item) => questionNumberFromToken(item[1]));
-      if (sequence.join(",") === "1,2,3,4") return false;
+  const markers = [...text.matchAll(NUMBERED_MARKER_REGEX)]
+    .map((match) => ({
+      match,
+      number: questionNumberFromToken(match[1]),
+      index: match.index || 0,
+      afterMarker: (match.index || 0) + match[0].length
+    }))
+    .filter((item) => item.number);
+  const choiceMarkerIndexes = new Set();
+  const starts = [];
+  const markerText = (markerIndex) => {
+    const marker = markers[markerIndex];
+    const next = markers[markerIndex + 1];
+    return text.slice(marker.afterMarker, next?.index ?? text.length).replace(/\s+/g, " ").trim();
+  };
+  const isChoiceLikeMarker = (markerIndex) => {
+    const value = markerText(markerIndex);
+    if (!value) return false;
+    if (value.length <= 90) return true;
+    return value.split(/\s+/).length <= 12 && !/[?;:]\s*$/.test(value);
+  };
+
+  markers.forEach((marker, index) => {
+    if (choiceMarkerIndexes.has(index)) return;
+    starts.push(marker.match);
+    const nextFour = markers.slice(index + 1, index + 5);
+    if (nextFour.length < 4) return;
+    const nextNumbers = nextFour.map((item) => item.number);
+    const localNumericChoices = nextNumbers.join(",") === "1,2,3,4";
+    const globalNumericChoices = nextNumbers.every((value, offset) => value === marker.number + offset + 1);
+    if ((localNumericChoices || globalNumericChoices) && [1, 2, 3, 4].every((offset) => isChoiceLikeMarker(index + offset))) {
+      [1, 2, 3, 4].forEach((offset) => choiceMarkerIndexes.add(index + offset));
     }
-    if (previous && current && current < previous && current !== 1) return false;
-    if (previous && current && current > previous + 20 && next && next < current) return false;
-    return true;
   });
+
+  return starts;
 }
 
 function extractChoicesFromBlock(block) {
+  const cleanReviewerChoiceText = (value) => value.replace(/\n+/g, " ").replace(/[^\w\s.,;:?!()/%+\-=₱$'"]*\s*$/g, "").trim();
+  const alphaChoiceRows = [...block.matchAll(/(?:^|\n)\s*([A-Da-d])\s*[\.\)]\s*([\s\S]*?)(?=\n\s*[A-Da-d]\s*[\.\)]\s+|$)/g)]
+    .map((match) => ({
+      letter: match[1].toUpperCase(),
+      index: match.index || 0,
+      format: "A-D",
+      text: cleanReviewerChoiceText(match[2])
+    }))
+    .filter((choice) => choice.text);
+  if (alphaChoiceRows.length >= 2) return alphaChoiceRows;
+
+  const questionNumber = questionNumberFromToken(block.match(/^\s*(?:Q\s*)?(\d{1,3})\s*(?:\.\s*\)|\)|\.)\s+/i)?.[1]);
+  const markerRows = [...block.matchAll(/(?:^|\n)\s*(\d{1,3})\s*(?:\.\s*\)|\)|\.)\s+/g)];
+  const numericChoiceRows = markerRows
+    .map((match, index) => ({
+      token: Number(match[1]),
+      index: match.index || 0,
+      text: cleanReviewerChoiceText(block.slice((match.index || 0) + match[0].length, markerRows[index + 1]?.index ?? block.length))
+    }))
+    .filter((choice) => choice.text && choice.index > 0);
+  for (let index = 0; index <= numericChoiceRows.length - 4; index++) {
+    const slice = numericChoiceRows.slice(index, index + 4);
+    const sequence = slice.map((choice) => choice.token);
+    const localNumericChoices = sequence.join(",") === "1,2,3,4";
+    const globalNumericChoices = questionNumber && sequence.every((value, offset) => value === questionNumber + offset + 1);
+    if (localNumericChoices || globalNumericChoices) {
+      return slice.map((choice, choiceIndex) => ({ letter: String(choiceIndex + 1), index: choice.index, format: "1-4", text: choice.text }));
+    }
+  }
+
   const matches = [...block.matchAll(/(?:^|\n)\s*([A-Da-d])\s*[\.\)]\s*([\s\S]*?)(?=\n\s*[A-Da-d]\s*[\.\)]\s+|$)/g)];
   const alphaChoices = matches.map((match) => ({
     letter: match[1].toUpperCase(),
