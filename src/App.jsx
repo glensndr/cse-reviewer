@@ -1545,6 +1545,7 @@ function extractActualReviewerQuestions(text, importItem) {
       difficulty: DIFFICULTIES[index % DIFFICULTIES.length],
       question: stem,
       choices,
+      choiceFormat: choiceRows[0]?.format || "A-D",
       answer,
       explanation: `Imported directly from ${importItem.name}. Review the source item and answer key for the official rationale.`,
       hint: "Use the exact reviewer item and eliminate choices using the tested concept.",
@@ -1673,10 +1674,10 @@ function questionNumberFromToken(token) {
   return match ? Number(match[0]) : null;
 }
 
-const QUESTION_NUMBER_REGEX_TEXT = String.raw`(?:^|\n)\s*((?:Q\s*)?\d{1,3})\s*(?:\.\s*\)|\)|\.)\s+`;
-const ANSWER_CHOICE_REGEX_TEXT = String.raw`(?:^|\n)\s*([A-Da-d])\s*[\.\)]\s+`;
-const QUESTION_NUMBER_REGEX = /(?:^|\n)\s*((?:Q\s*)?\d{1,3})\s*(?:\.\s*\)|\)|\.)\s+/gi;
-const ANSWER_CHOICE_REGEX = /(?:^|\n)\s*([A-Da-d])\s*[\.\)]\s+/gi;
+const QUESTION_NUMBER_REGEX_TEXT = String.raw`(?:^|\n)\s*((?:[Qq]\s*)?\d{1,3})\s*(?:\.\s*\)|\)|\.)\s+(?=[A-Z0-9(])`;
+const ANSWER_CHOICE_REGEX_TEXT = String.raw`(?:^|\n)\s*([A-Da-d]|[1-4])\s*[\.\)]\s+`;
+const QUESTION_NUMBER_REGEX = /(?:^|\n)\s*((?:[Qq]\s*)?\d{1,3})\s*(?:\.\s*\)|\)|\.)\s+(?=[A-Z0-9(])/g;
+const ANSWER_CHOICE_REGEX = /(?:^|\n)\s*([A-Da-d]|[1-4])\s*[\.\)]\s+/gi;
 
 function previewAround(text, index, length = 180) {
   const start = Math.max(0, index - 45);
@@ -1701,8 +1702,8 @@ function parserDebugReport(rawText) {
     return {
       token: match[1],
       index: match.index || 0,
-      hasChoiceA: /(?:^|\n)\s*a\s*[\.\)]\s+/i.test(tail),
-      hasChoiceB: /(?:^|\n)\s*b\s*[\.\)]\s+/i.test(tail),
+      hasChoiceA: /(?:^|\n)\s*(?:a|1)\s*[\.\)]\s+/i.test(tail),
+      hasChoiceB: /(?:^|\n)\s*(?:b|2)\s*[\.\)]\s+/i.test(tail),
       tail: tail.replace(/\n/g, "\\n")
     };
   });
@@ -1740,6 +1741,13 @@ function findReviewerQuestionStarts(text) {
     const current = questionNumberFromToken(match[1]);
     const previous = index ? questionNumberFromToken(numbered[index - 1][1]) : null;
     const next = numbered[index + 1] ? questionNumberFromToken(numbered[index + 1][1]) : null;
+    const windowFour = numbered.slice(index, index + 4).map((item) => questionNumberFromToken(item[1]));
+    if (windowFour.join(",") === "1,2,3,4" && previous && previous !== 0) return false;
+    const sequenceStart = index - current + 1;
+    if ([2, 3, 4].includes(current) && sequenceStart >= 0) {
+      const sequence = numbered.slice(sequenceStart, sequenceStart + 4).map((item) => questionNumberFromToken(item[1]));
+      if (sequence.join(",") === "1,2,3,4") return false;
+    }
     if (previous && current && current < previous && current !== 1) return false;
     if (previous && current && current > previous + 20 && next && next < current) return false;
     return true;
@@ -1748,11 +1756,27 @@ function findReviewerQuestionStarts(text) {
 
 function extractChoicesFromBlock(block) {
   const matches = [...block.matchAll(/(?:^|\n)\s*([A-Da-d])\s*[\.\)]\s*([\s\S]*?)(?=\n\s*[A-Da-d]\s*[\.\)]\s+|$)/g)];
-  return matches.map((match) => ({
+  const alphaChoices = matches.map((match) => ({
     letter: match[1].toUpperCase(),
     index: match.index || 0,
+    format: "A-D",
     text: match[2].replace(/\n+/g, " ").replace(/[✓✔*]\s*$/g, "").trim()
   })).filter((choice) => choice.text);
+  if (alphaChoices.length >= 2) return alphaChoices;
+  const numericMatches = [...block.matchAll(/(?:^|\n)\s*([1-4])\s*[\.\)]\s*([\s\S]*?)(?=\n\s*[1-4]\s*[\.\)]\s+|$)/g)]
+    .map((match) => ({
+      token: Number(match[1]),
+      index: match.index || 0,
+      text: match[2].replace(/\n+/g, " ").replace(/[✓✔*]\s*$/g, "").trim()
+    }))
+    .filter((choice) => choice.text);
+  for (let index = 0; index <= numericMatches.length - 4; index++) {
+    const slice = numericMatches.slice(index, index + 4);
+    if (slice.map((choice) => choice.token).join(",") === "1,2,3,4" && slice[0].index > 0) {
+      return slice.map((choice, choiceIndex) => ({ letter: String(choiceIndex + 1), index: choice.index, format: "1-4", text: choice.text }));
+    }
+  }
+  return [];
 }
 
 function auditReviewerQuestionBlocks(text, starts) {
@@ -1776,6 +1800,7 @@ function auditReviewerQuestionBlocks(text, starts) {
       nextQuestionPosition: blockEnd,
       extractedBlockLength: block.length,
       choiceCountFound: choiceRows.length,
+      choiceFormatUsed: choiceRows[0]?.format || "None",
       accepted: reason === "Accepted",
       reason,
       questionText: stem.slice(0, 260),
@@ -3564,7 +3589,7 @@ export default function App() {
                   <div className="mt-3 max-h-80 space-y-3 overflow-auto">
                     {(item.extractedQuestions || []).slice(0, 20).map((q) => <div key={q.id} className="rounded-xl bg-white/5 p-3">
                       <p className="font-bold text-white/80">{q.questionNumber ? `${q.questionNumber}. ` : ""}{q.question}</p>
-                      <p className="mt-1 text-white/45">Choices: {q.choices.length} - {q.category} - {q.subCategory} - {q.answer ? "Approved" : "Pending Review"}</p>
+                      <p className="mt-1 text-white/45">Choices: {q.choices.length} - Format: {q.choiceFormat || "A-D"} - {q.category} - {q.subCategory} - {q.answer ? "Approved" : "Pending Review"}</p>
                       <div className="mt-2 grid gap-1 sm:grid-cols-2">{q.choices.map((choice, idx) => <span key={`${q.id}-${choice}`} className="rounded-lg bg-slate-900/70 p-2">{choiceLetters[idx]}. {choice}</span>)}</div>
                     </div>)}
                   </div>
