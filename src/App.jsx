@@ -1694,28 +1694,33 @@ function parserDebugReport(rawText) {
     cleanedBlocks: blocks,
     strictQuestionStarts: starts.slice(0, 5).map((match) => ({ token: match[1], index: match.index || 0 })),
     failurePoint: starts.length
-      ? "Question starts were found. If parsed count is still 0, inspect the cleaned blocks and choice extraction."
+      ? "Question starts were found. Each block is now accepted when it has question text and at least 2 choices; missing answer keys become Pending Review."
       : questionMatches.length
-        ? "Question-number regex matched, but strict question-start filtering rejected them because nearby A/B choices were not detected after preprocessing."
+        ? "Question-number regex matched, but no usable question blocks were assembled. Check whether question-number matches are answer-key lines or page artifacts."
         : "Question-number regex found no matches in cleaned text. The extracted PDF text likely has spacing or glyphs that still need normalization."
   };
 }
 
 function findReviewerQuestionStarts(text) {
   const matches = [...text.matchAll(QUESTION_NUMBER_REGEX)];
-  const candidates = matches.filter((match) => {
-    const number = questionNumberFromToken(match[1]);
-    if (!number) return false;
-    const tail = text.slice((match.index || 0) + match[0].length, (match.index || 0) + match[0].length + 260);
-    return /(?:^|\n)\s*a\s*[\.\)]\s+/i.test(tail) && /(?:^|\n)\s*b\s*[\.\)]\s+/i.test(tail);
-  });
-  return candidates.filter((match, index) => {
+  const numbered = matches.filter((match) => questionNumberFromToken(match[1]));
+  return numbered.filter((match, index) => {
     const current = questionNumberFromToken(match[1]);
-    const previous = index ? questionNumberFromToken(candidates[index - 1][1]) : null;
-    const next = candidates[index + 1] ? questionNumberFromToken(candidates[index + 1][1]) : null;
+    const previous = index ? questionNumberFromToken(numbered[index - 1][1]) : null;
+    const next = numbered[index + 1] ? questionNumberFromToken(numbered[index + 1][1]) : null;
+    if (previous && current && current < previous && current !== 1) return false;
     if (previous && current && current > previous + 20 && next && next < current) return false;
     return true;
   });
+}
+
+function extractChoicesFromBlock(block) {
+  const matches = [...block.matchAll(/(?:^|\n)\s*([A-Da-d])\s*[\.\)]\s*([\s\S]*?)(?=\n\s*[A-Da-d]\s*[\.\)]\s+|$)/g)];
+  return matches.map((match) => ({
+    letter: match[1].toUpperCase(),
+    index: match.index || 0,
+    text: match[2].replace(/\n+/g, " ").replace(/[✓✔*]\s*$/g, "").trim()
+  })).filter((choice) => choice.text);
 }
 
 function extractActualReviewerQuestionsV2(text, importItem) {
@@ -1745,13 +1750,13 @@ function extractActualReviewerQuestionsV2(text, importItem) {
       if (section) currentSection = section;
     });
     const block = bodyText.slice(blockStart, blockEnd).trim();
-    const choiceMatches = [...block.matchAll(/(?:^|\n)\s*([A-Da-d])\s*[\.\)]\s*([\s\S]*?)(?=\n\s*[A-Da-d]\s*[\.\)]\s+|$)/g)];
-    if (choiceMatches.length < 4) return;
-    const firstChoiceAt = choiceMatches[0].index ?? block.search(/\n\s*A[\.\)]\s+/i);
+    const choiceRows = extractChoicesFromBlock(block);
+    if (choiceRows.length < 2) return;
+    const firstChoiceAt = choiceRows[0].index;
     const questionNumber = questionNumberFromToken(start[1]);
     const stem = block.slice(0, firstChoiceAt).replace(/^\s*(?:Q\s*)?\d{1,3}[\.\)]\s*/, "").trim();
     if (!stem || stem.length < 12) return;
-    const choices = choiceMatches.slice(0, 4).map((match) => match[2].replace(/\n+/g, " ").replace(/[✓✔*]\s*$/g, "").trim());
+    const choices = choiceRows.slice(0, 4).map((choice) => choice.text);
     const keyLetter = questionNumber ? answerKey[questionNumber] : "";
     const answer = keyLetter ? choices["ABCD".indexOf(keyLetter)] || "" : "";
     const mapped = currentSection || classifyReviewerQuestion(`${stem} ${choices.join(" ")}`, importItem);
