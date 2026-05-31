@@ -2053,6 +2053,7 @@ function arithmeticFromConcept(text) {
     .replace(/[×x]/gi, "*")
     .replace(/[÷]/g, "/")
     .replace(/^\s*(?:Q\s*)?\d{1,3}\s*(?:\.\s*\)|\)|\.)\s*/i, "")
+    .replace(/\b\d{1,3}(?:,\d{3})+(?:\.\d+)?\b/g, (value) => value.replace(/,/g, ""))
     .replace(/\s+[A-Da-d]\s*[\.\)]\s+[\s\S]*$/, " ")
     .replace(/\?/g, " ")
     .trim();
