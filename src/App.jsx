@@ -1616,9 +1616,11 @@ function classifyReviewerQuestion(text, fallbackItem) {
 function normalizeReviewerText(text) {
   return text
     .replace(/\r/g, "\n")
+    .replace(/P\s*a\s*g\s*e\s*\|\s*\d+/gi, "\n")
+    .replace(/[^\S\n]+/g, " ")
+    .replace(/([^\n])\s+((?:Q\s*)?\d{1,3})\s*[\.\)]\s+(?=[A-Z0-9(])/gi, "$1\n$2. ")
+    .replace(/([^\n])\s+([A-Da-d])\s*[\.\)]\s+(?=\S)/g, "$1\n$2. ")
     .replace(/[ \t]+/g, " ")
-    .replace(/([^\n])\s+((?:Q\s*)?\d{1,3})\s*[\.\)]\s+/gi, "$1\n$2. ")
-    .replace(/([^\n])\s+([A-Da-d])\s*[\.\)]\s+/g, "$1\n$2. ")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
@@ -1643,6 +1645,23 @@ function questionNumberFromToken(token) {
   return match ? Number(match[0]) : null;
 }
 
+function findReviewerQuestionStarts(text) {
+  const matches = [...text.matchAll(/(?:^|\n)\s*((?:Q\s*)?\d{1,3})\s*[\.\)]\s+/gi)];
+  const candidates = matches.filter((match) => {
+    const number = questionNumberFromToken(match[1]);
+    if (!number) return false;
+    const tail = text.slice((match.index || 0) + match[0].length, (match.index || 0) + match[0].length + 260);
+    return /(?:^|\n)\s*a\s*[\.\)]\s+/i.test(tail) && /(?:^|\n)\s*b\s*[\.\)]\s+/i.test(tail);
+  });
+  return candidates.filter((match, index) => {
+    const current = questionNumberFromToken(match[1]);
+    const previous = index ? questionNumberFromToken(candidates[index - 1][1]) : null;
+    const next = candidates[index + 1] ? questionNumberFromToken(candidates[index + 1][1]) : null;
+    if (previous && current && current > previous + 20 && next && next < current) return false;
+    return true;
+  });
+}
+
 function extractActualReviewerQuestionsV2(text, importItem) {
   const normalized = normalizeReviewerText(text);
   const emptyStats = { extractedTextLength: normalized.length, questionsDetected: 0, questionsWithChoices: 0, questionsWithAnswerKeys: 0, questionsWithoutAnswerKeys: 0, sectionsDetected: [] };
@@ -1653,7 +1672,7 @@ function extractActualReviewerQuestionsV2(text, importItem) {
   }
   const answerKey = extractAnswerKeyMap(normalized);
   const bodyText = trimAnswerKeyText(normalized);
-  const starts = [...bodyText.matchAll(/(?:^|\n)\s*((?:Q\s*)?\d{1,3})\s*[\.\)]\s+/gi)];
+  const starts = findReviewerQuestionStarts(bodyText);
   const questions = [];
   const detectedSections = [];
   let currentSection = null;
